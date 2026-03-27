@@ -8,3 +8,4 @@
 ## Documents
 
 - [VQ1 Technical Specs](VQ1_tech_specs.pdf)
+- [Local Dev Setup (PX4 SITL)](LOCAL_DEV_SETUP.md)
