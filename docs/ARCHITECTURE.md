@@ -46,7 +46,7 @@ No GPS or absolute positioning is provided. No depth sensor. The only inputs are
 
 **Functional over OOP.** Pipeline stages are functions, not classes. Each stage takes inputs and returns outputs with no shared mutable state. This makes stages independently testable, swappable, and easy to reason about.
 
-**Pure logic separate from side effects.** The `pipeline/` layer contains pure functions. The `io/` layer is where side effects live — reading telemetry from MAVSDK, writing commands to the sim. Pipeline stages can be tested without a running simulator.
+**Pure logic separate from side effects.** The `pipeline/` layer contains pure functions. The `sim_io/` layer is where side effects live — reading telemetry from MAVSDK, writing commands to the sim. Pipeline stages can be tested without a running simulator.
 
 **Stubs enable parallel development.** Because stages have clean interfaces, any stage can be replaced with a hardcoded stub. This means planning and control can be developed and tuned before perception is working.
 
@@ -62,10 +62,10 @@ Drone_Grand_Prix/
 │   ├── perception.py    # camera frame → gate observations
 │   ├── planner.py       # gate observations + drone state → target waypoint
 │   └── controller.py    # target waypoint + drone state → attitude command (PID)
-├── io/
+├── sim_io/
 │   ├── telemetry.py     # MAVSDK streams → DroneState
 │   └── commands.py      # attitude command → SET_ATTITUDE_TARGET
-├── types.py             # shared data types
+├── drone_types.py       # shared data types
 ├── main.py              # wires pipeline together, runs async loop
 ├── connect.py           # connectivity diagnostic, not part of pipeline
 └── tests/
@@ -76,9 +76,9 @@ Drone_Grand_Prix/
 
 **`pipeline/`** contains pure functions with no MAVSDK imports. Testable without the sim.
 
-**`io/`** contains all MAVSDK interaction. This is the only layer that changes when swapping from PX4 SITL to the competition sim.
+**`sim_io/`** contains all MAVSDK interaction. This is the only layer that changes when swapping from PX4 SITL to the competition sim.
 
-**`types.py`** defines the contracts between stages. Every stage imports from here. Changing a type here surfaces all the places that need to be updated.
+**`drone_types.py`** defines the contracts between stages. Every stage imports from here. Changing a type here surfaces all the places that need to be updated.
 
 **`main.py`** is glue only — it imports stages, wires them together, and runs the loop. It contains no pipeline logic.
 
@@ -152,7 +152,7 @@ Get a stubbed pipeline wired end-to-end:
 
 ### Phase 5 — Integration and competition prep
 - Full pipeline running end-to-end
-- Swap `io/` layer for competition sim interface (Windows only)
+- Swap `sim_io/` layer for competition sim interface (Windows only)
 - VQ1 goal: complete the course (< 10 gates), speed is secondary
 
 ---
