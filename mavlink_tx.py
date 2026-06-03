@@ -1,0 +1,49 @@
+"""MAVLink command senders.
+
+Thin wrappers around pymavlink to send control commands to the sim.
+"""
+
+import time
+
+from pymavlink import mavutil
+
+
+# Bitmask for SET_POSITION_TARGET_LOCAL_NED to use velocity only
+# (ignore position, acceleration, yaw, and yaw rate).
+VELOCITY_ONLY_MASK = (
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+)
+
+
+def send_velocity_ned(mavlink_conn, system_boot_ms, vn, ve, vd):
+    """Send a NED velocity setpoint."""
+    now_ms = int(time.time() * 1000)
+    mavlink_conn.mav.set_position_target_local_ned_send(
+        now_ms - system_boot_ms,
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        VELOCITY_ONLY_MASK,
+        0.0, 0.0, 0.0,        # position (ignored)
+        vn, ve, vd,           # velocity NED
+        0.0, 0.0, 0.0,        # acceleration (ignored)
+        0.0, 0.0,             # yaw, yaw_rate (ignored)
+    )
+
+
+def send_arm(mavlink_conn):
+    """Arm the drone."""
+    mavlink_conn.mav.command_long_send(
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        0,
+        1, 0, 0, 0, 0, 0, 0,
+    )

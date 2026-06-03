@@ -1,88 +1,40 @@
-"""Main loop: wires the pipeline together and runs it against the sim."""
+"""Entry point. Connect, arm, run the control loop until done."""
 
-import asyncio
-import math
-from mavsdk import System
-from mavsdk.offboard import Attitude, OffboardError
+import time
 
-from sim_io.telemetry import get_drone_state
-from sim_io.commands import send_attitude_command
-from pipeline.perception import detect_gates, STUB_GATES_NED
-from pipeline.planner import plan_next_waypoint
-from pipeline.controller import compute_attitude_command
+from setup import setup_components
 
 
-LOOP_HZ = 50
-LOOP_PERIOD_S = 1.0 / LOOP_HZ
+SIM_SERVER_UDP_IP = "127.0.0.1"
+SIM_SERVER_UDP_PORT = 14550
 
 
-async def main():
-    drone = System()
+def main():
+    system_boot_ms = int(time.time() * 1000)
+    components = setup_components(SIM_SERVER_UDP_IP, SIM_SERVER_UDP_PORT, system_boot_ms)
 
-    print("Connecting...")
-    await drone.connect(system_address="udpin://0.0.0.0:14550")
+    controller = components["controller"]
+    shared = components["shared"]
 
-    async for state in drone.core.connection_state():
-        if state.is_connected:
-            print("Connected!")
-            break
+    print("Arming...", flush=True)
+    controller.arm()
 
-    # Wait for telemetry
-    print("Waiting for telemetry...")
-    async for att in drone.telemetry.attitude_euler():
-        print(f"  attitude: roll={att.roll_deg:.1f} pitch={att.pitch_deg:.1f} yaw={att.yaw_deg:.1f}")
-        break
-    print("Ready.")
-
-    # Arm (PX4 SITL requires this; competition sim may not)
-    print("Arming...")
-    await drone.action.arm()
-
-    # Set an initial setpoint before starting offboard
-    await drone.offboard.set_attitude(Attitude(0.0, 0.0, 0.0, 0.0))
-
-    print("Starting offboard mode...")
+    print("Running control loop. Ctrl+C to stop.", flush=True)
     try:
-        await drone.offboard.start()
-    except OffboardError as e:
-        print(f"Offboard start failed: {e}")
-        return
+        while True:
+            controller.update()
+            if shared.race_status and shared.race_status.race_finished:
+                print("Race finished!", flush=True)
+                break
+    except KeyboardInterrupt:
+        print("Interrupted.", flush=True)
 
-    # --- Pipeline loop ---
-    next_gate_index = 0
-    total_gates = len(STUB_GATES_NED)
+    # Join background threads
+    for name in ("mavlink_rx", "timesync", "vision_rx"):
+        components[name].get_thread_for_join().join(timeout=1.0)
 
-    print(f"Flying course ({total_gates} gates)...")
-
-    while next_gate_index < total_gates:
-        state = await get_drone_state(drone)
-
-        observations = detect_gates(None, state)
-
-        waypoint, next_gate_index = plan_next_waypoint(
-            observations, state, next_gate_index,
-        )
-
-        cmd = compute_attitude_command(waypoint, state)
-
-        await send_attitude_command(drone, cmd)
-
-        print(
-            f"  gate={next_gate_index}/{total_gates}"
-            f"  pos=({state.north_m:.1f}, {state.east_m:.1f}, {state.down_m:.1f})"
-            f"  thr={cmd.throttle:.2f}"
-            f"  r={math.degrees(cmd.roll_rad):.1f}"
-            f"  p={math.degrees(cmd.pitch_rad):.1f}",
-            end="\r",
-        )
-
-        await asyncio.sleep(LOOP_PERIOD_S)
-
-    print("\nCourse complete!")
-
-    await drone.offboard.stop()
-    await drone.action.land()
+    print("Exited.", flush=True)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

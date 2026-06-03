@@ -43,3 +43,19 @@ Append-only log of sessions, decisions, and reasoning. Never edit past entries.
 - Latency benchmark: pipeline tick 20us median / 80us p99 — ~100x headroom at 120Hz. CPU is not a concern.
 - Found Windows timer resolution issue: `asyncio.sleep(1/120)` overshoots ~8ms. Not VM-specific. Fix later via `timeBeginPeriod(1)` or by driving the loop off telemetry events instead of sleep.
 - Open risk: sim's GPU framerate under Parallels — unknown until sim drops. Contingency would be bare-metal Windows.
+
+---
+
+## 2026-06-03 — VQ1 Simulator Released, Major Rewrite
+
+- Simulator released, downloaded and extracted `PyAIPilotExample` reference code
+- Reading the example overturned several prior assumptions:
+    - Sim is pymavlink-based, not MAVSDK
+    - Position/velocity setpoints **are** supported (April FAQ misled us)
+    - Sim provides full track layout via `ENCAPSULATED_DATA` — vision not required for VQ1
+    - Sim provides `active_gate_index` via race status — we don't sequence gates ourselves
+    - Control loop is 250 Hz, attitude commands use body rates (not absolute angles)
+- Rewrote codebase from scratch to match example structure: `mavlink_rx/tx`, `vision_rx`, `timesync`, `controller`, `setup`, `main`, `state`
+- Moved all pre-sim code into `legacy/` — kept for reference, not for extension
+- VQ1 baseline strategy: velocity vector toward active gate, no vision
+- ARCHITECTURE.md rewritten to reflect actual sim interface
