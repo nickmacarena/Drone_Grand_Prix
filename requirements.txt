@@ -1,3 +1,6 @@
 pymavlink
-opencv-python
-numpy
+
+# Vision deps deferred until VQ2. opencv-python pulls in an older numpy that has
+# no prebuilt win_arm64 wheel for Python 3.14, requiring MSVC to build.
+# opencv-python
+# numpy

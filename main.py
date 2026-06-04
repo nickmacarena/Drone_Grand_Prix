@@ -5,7 +5,7 @@ import time
 from setup import setup_components
 
 
-SIM_SERVER_UDP_IP = "127.0.0.1"
+SIM_SERVER_UDP_IP = "0.0.0.0"  # bind to all interfaces — sim sends from VM
 SIM_SERVER_UDP_PORT = 14550
 
 
@@ -30,7 +30,7 @@ def main():
         print("Interrupted.", flush=True)
 
     # Join background threads
-    for name in ("mavlink_rx", "timesync", "vision_rx"):
+    for name in ("mavlink_rx", "timesync"):
         components[name].get_thread_for_join().join(timeout=1.0)
 
     print("Exited.", flush=True)

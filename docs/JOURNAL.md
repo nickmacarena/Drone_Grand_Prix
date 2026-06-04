@@ -59,3 +59,14 @@ Append-only log of sessions, decisions, and reasoning. Never edit past entries.
 - Moved all pre-sim code into `legacy/` — kept for reference, not for extension
 - VQ1 baseline strategy: velocity vector toward active gate, no vision
 - ARCHITECTURE.md rewritten to reflect actual sim interface
+
+---
+
+## 2026-06-03 — VM Migrated to VMware Fusion, Networking Verified
+
+- Parallels trial expired; migrated to VMware Fusion 26H1 (free for personal use)
+- Windows 11 ARM 25H2 VM, 4 CPU / 8 GB RAM, NAT networking
+- VM IP `192.168.129.128`, Mac reachable from VM at `192.168.129.1` (Fusion's NAT host route)
+- Verified bidirectional UDP on ports 14550 (MAVLink) and 5600 (vision)
+- Updated `main.py` to bind `0.0.0.0` instead of `127.0.0.1` so the listener accepts VM traffic
+- FlightSim.exe runs in VM but with limited 3D performance (no GPU passthrough, x86 emulation). Adequate for connectivity testing; serious dev will need a Windows box with a real GPU.

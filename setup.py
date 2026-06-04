@@ -6,7 +6,9 @@ from controller import Controller
 from mavlink_rx import MAVLinkRX
 from state import SharedState
 from timesync import TimeSync
-from vision_rx import VisionRX
+
+# Vision deferred until VQ2 — opencv/numpy install is blocked on Python 3.14 win_arm64.
+# from vision_rx import VisionRX
 
 
 def setup_components(server_ip: str, server_port: int, system_boot_ms: int):
@@ -18,7 +20,6 @@ def setup_components(server_ip: str, server_port: int, system_boot_ms: int):
     shared = SharedState()
     mavlink_rx = MAVLinkRX(mavlink_conn, shared)
     timesync = TimeSync(mavlink_conn)
-    vision_rx = VisionRX(shared)
     controller = Controller(mavlink_conn, shared, system_boot_ms)
 
     return {
@@ -26,6 +27,5 @@ def setup_components(server_ip: str, server_port: int, system_boot_ms: int):
         "shared": shared,
         "mavlink_rx": mavlink_rx,
         "timesync": timesync,
-        "vision_rx": vision_rx,
         "controller": controller,
     }
