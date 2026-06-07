@@ -3,6 +3,7 @@
 from pymavlink import mavutil
 
 from controller import Controller
+from heartbeat import Heartbeat
 from mavlink_rx import MAVLinkRX
 from state import SharedState
 from timesync import TimeSync
@@ -20,6 +21,7 @@ def setup_components(server_ip: str, server_port: int, system_boot_ms: int):
     shared = SharedState()
     mavlink_rx = MAVLinkRX(mavlink_conn, shared)
     timesync = TimeSync(mavlink_conn)
+    heartbeat = Heartbeat(mavlink_conn)
     controller = Controller(mavlink_conn, shared, system_boot_ms)
 
     return {
@@ -27,5 +29,6 @@ def setup_components(server_ip: str, server_port: int, system_boot_ms: int):
         "shared": shared,
         "mavlink_rx": mavlink_rx,
         "timesync": timesync,
+        "heartbeat": heartbeat,
         "controller": controller,
     }

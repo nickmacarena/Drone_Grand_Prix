@@ -56,10 +56,20 @@ class RaceStatus:
     last_gate_race_time_s: float
 
 
+@dataclass(frozen=True)
+class HeartbeatStatus:
+    """Latest HEARTBEAT from the sim. Tells us armed state and current mode."""
+    armed: bool
+    base_mode: int        # MAV_MODE_FLAG bitfield
+    custom_mode: int      # autopilot-specific mode value
+    system_status: int    # MAV_STATE
+
+
 @dataclass
 class SharedState:
     """Mutable container. Background threads write, control loop reads."""
     drone_state: Optional[DroneState] = None
     track_data: Optional[TrackData] = None
     race_status: Optional[RaceStatus] = None
+    heartbeat: Optional[HeartbeatStatus] = None
     latest_frame: Optional[object] = None  # numpy array, kept loosely typed

@@ -30,7 +30,7 @@ def main():
         print("Interrupted.", flush=True)
 
     # Join background threads
-    for name in ("mavlink_rx", "timesync"):
+    for name in ("mavlink_rx", "timesync", "heartbeat"):
         components[name].get_thread_for_join().join(timeout=1.0)
 
     print("Exited.", flush=True)

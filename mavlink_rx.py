@@ -10,7 +10,7 @@ import time
 
 from pymavlink import mavutil
 
-from state import DroneState, Gate, RaceStatus, SharedState, TrackData
+from state import DroneState, Gate, HeartbeatStatus, RaceStatus, SharedState, TrackData
 
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
@@ -62,6 +62,12 @@ class MAVLinkRX:
             elif t == "DATA_TRANSMISSION_HANDSHAKE":
                 self._track_chunks[msg.width] = {}
                 self._track_total[msg.width] = msg.packets
+            elif t == "HEARTBEAT":
+                self._on_heartbeat(msg)
+            elif t == "COMMAND_ACK":
+                self._on_command_ack(msg)
+            elif t == "STATUSTEXT":
+                self._on_statustext(msg)
 
     def _on_attitude(self, msg):
         self._att = (msg.roll, msg.pitch, msg.yaw)
@@ -127,3 +133,35 @@ class MAVLinkRX:
             gates.append(Gate(gid, nx, ny, nz, qw, qx, qy, qz, w, h))
             payload = payload[38:]
         self.shared.track_data = TrackData(gates=tuple(gates))
+
+    def _on_heartbeat(self, msg):
+        armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+        self.shared.heartbeat = HeartbeatStatus(
+            armed=armed,
+            base_mode=msg.base_mode,
+            custom_mode=msg.custom_mode,
+            system_status=msg.system_status,
+        )
+
+    def _on_command_ack(self, msg):
+        # Always print — these are rare and informative
+        result_names = {
+            0: "ACCEPTED",
+            1: "TEMPORARILY_REJECTED",
+            2: "DENIED",
+            3: "UNSUPPORTED",
+            4: "FAILED",
+            5: "IN_PROGRESS",
+            6: "CANCELLED",
+        }
+        result_str = result_names.get(msg.result, f"RESULT_{msg.result}")
+        print(f"  [COMMAND_ACK] cmd={msg.command} result={result_str}", flush=True)
+
+    def _on_statustext(self, msg):
+        severity_names = {
+            0: "EMERGENCY", 1: "ALERT", 2: "CRITICAL", 3: "ERROR",
+            4: "WARNING", 5: "NOTICE", 6: "INFO", 7: "DEBUG",
+        }
+        sev_str = severity_names.get(msg.severity, f"SEV_{msg.severity}")
+        text = msg.text.decode("utf-8", errors="replace") if isinstance(msg.text, bytes) else msg.text
+        print(f"  [STATUSTEXT {sev_str}] {text}", flush=True)

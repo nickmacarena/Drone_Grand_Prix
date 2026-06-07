@@ -43,6 +43,7 @@ class Controller:
         ds = self.shared.drone_state
         td = self.shared.track_data
         rs = self.shared.race_status
+        hb = self.shared.heartbeat
 
         if td and not self._logged_gates:
             print(f"  Track has {len(td.gates)} gates:", flush=True)
@@ -58,4 +59,8 @@ class Controller:
             f"active={rs.active_gate_index} started={rs.race_started}"
             if rs else "race=None"
         )
-        print(f"  {ds_str}  {rs_str}  thrust={TEST_THRUST}", flush=True)
+        hb_str = (
+            f"armed={hb.armed} base={hb.base_mode:#x} custom={hb.custom_mode} status={hb.system_status}"
+            if hb else "hb=None"
+        )
+        print(f"  {ds_str}  {rs_str}  {hb_str}  thrust={TEST_THRUST}", flush=True)
