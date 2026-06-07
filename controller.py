@@ -1,28 +1,19 @@
 """Main control loop.
 
-Strategy for VQ1:
-    Track data gives us every gate's NED position.
-    Race status tells us which gate is active.
-    Local position tells us where we are.
-
-    Phase 1: climb to TAKEOFF_ALT_M.
-    Phase 2: fly velocity vector toward the active gate.
-
-    Sends SET_POSITION_TARGET_LOCAL_NED with velocity-only mask.
-    The sim's stabilized controller handles attitude and motor mixing.
+DIAGNOSTIC MODE: sends attitude rates + thrust=0.6 (mirrors example values).
+Verifies that the drone is armed and responsive to ANY control command.
+If the drone lifts off in this mode, velocity setpoints are the problem.
+If still nothing moves, the issue is upstream (arming, mode, etc).
 """
 
-import math
 import time
 
-from mavlink_tx import send_arm, send_velocity_ned
+from mavlink_tx import send_arm, send_attitude_rates
 from state import SharedState
 
 
 CONTROL_HZ = 250
-CRUISE_SPEED_MPS = 3.0
-TAKEOFF_ALT_M = 3.0  # how high to climb before chasing gates
-TAKEOFF_SPEED_MPS = 2.0
+TEST_THRUST = 0.6
 LOG_PERIOD_S = 1.0
 
 
@@ -38,42 +29,12 @@ class Controller:
         send_arm(self.mavlink_conn)
 
     def update(self):
-        vn, ve, vd = self._compute_velocity()
-        send_velocity_ned(self.mavlink_conn, self.system_boot_ms, vn, ve, vd)
-        self._maybe_log(vn, ve, vd)
+        # Zero rates, thrust=0.6. Should make the drone hover/climb.
+        send_attitude_rates(self.mavlink_conn, self.system_boot_ms, 0.0, 0.0, 0.0, TEST_THRUST)
+        self._maybe_log()
         time.sleep(1.0 / CONTROL_HZ)
 
-    def _compute_velocity(self) -> tuple[float, float, float]:
-        """Return (vn, ve, vd) m/s in NED."""
-        ds = self.shared.drone_state
-        td = self.shared.track_data
-        rs = self.shared.race_status
-
-        if ds is None or td is None or rs is None:
-            return 0.0, 0.0, 0.0
-
-        # Takeoff phase: climb until we're above TAKEOFF_ALT_M.
-        # In NED, down is positive, so altitude = -down_m.
-        altitude_m = -ds.down_m
-        if altitude_m < TAKEOFF_ALT_M:
-            return 0.0, 0.0, -TAKEOFF_SPEED_MPS  # negative vd = up
-
-        if rs.race_finished or rs.active_gate_index >= len(td.gates):
-            return 0.0, 0.0, 0.0
-
-        gate = td.gates[rs.active_gate_index]
-        dn = gate.north_m - ds.north_m
-        de = gate.east_m - ds.east_m
-        dd = gate.down_m - ds.down_m
-
-        dist = math.sqrt(dn * dn + de * de + dd * dd)
-        if dist < 0.1:
-            return 0.0, 0.0, 0.0
-
-        scale = CRUISE_SPEED_MPS / dist
-        return dn * scale, de * scale, dd * scale
-
-    def _maybe_log(self, vn: float, ve: float, vd: float):
+    def _maybe_log(self):
         now = time.time()
         if now - self._last_log_t < LOG_PERIOD_S:
             return
@@ -83,7 +44,6 @@ class Controller:
         td = self.shared.track_data
         rs = self.shared.race_status
 
-        # One-time gate dump when track data first arrives
         if td and not self._logged_gates:
             print(f"  Track has {len(td.gates)} gates:", flush=True)
             for g in td.gates:
@@ -94,11 +54,8 @@ class Controller:
             f"pos=({ds.north_m:.1f},{ds.east_m:.1f},{ds.down_m:.1f})"
             if ds else "pos=None"
         )
-        td_str = f"gates={len(td.gates)}" if td else "gates=None"
         rs_str = (
-            f"active={rs.active_gate_index} started={rs.race_started} finished={rs.race_finished}"
+            f"active={rs.active_gate_index} started={rs.race_started}"
             if rs else "race=None"
         )
-        vel_str = f"vel=({vn:.2f},{ve:.2f},{vd:.2f})"
-
-        print(f"  {ds_str}  {td_str}  {rs_str}  {vel_str}", flush=True)
+        print(f"  {ds_str}  {rs_str}  thrust={TEST_THRUST}", flush=True)
