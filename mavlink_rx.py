@@ -98,13 +98,16 @@ class MAVLinkRX:
 
     def _on_race_status(self, payload):
         # <BQqqIq>: data_type, sim_boot_ms, race_start_boot_ms, race_finish_ns, active_gate, last_gate_time
-        _, _, race_start, race_finish, active_gate, last_gate_time = struct.unpack_from(
+        _, sim_boot_ms, race_start_ms, race_finish_ns, active_gate, last_gate_time = struct.unpack_from(
             "<BQqqIq", payload
         )
+        # Race has actually started once sim time has reached the scheduled start.
+        # race_start_ms < 0 means the race isn't even scheduled yet.
+        race_started = race_start_ms >= 0 and sim_boot_ms >= race_start_ms
         self.shared.race_status = RaceStatus(
             active_gate_index=active_gate,
-            race_started=race_start >= 0,
-            race_finished=race_finish >= 0,
+            race_started=race_started,
+            race_finished=race_finish_ns >= 0,
             last_gate_race_time_s=last_gate_time / 1e9 if last_gate_time > 0 else 0.0,
         )
 
