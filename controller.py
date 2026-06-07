@@ -13,15 +13,13 @@ Strategy for VQ1:
     we detect armed=False.
 """
 
-import math
 import time
 
-from mavlink_tx import send_arm, send_velocity_ned
+from mavlink_tx import send_arm, send_position_ned
 from state import SharedState
 
 
 CONTROL_HZ = 250
-CRUISE_SPEED_MPS = 5.0
 REARM_PERIOD_S = 0.5
 LOG_PERIOD_S = 1.0
 
@@ -41,9 +39,17 @@ class Controller:
 
     def update(self):
         self._maybe_rearm()
-        vn, ve, vd = self._compute_velocity()
-        send_velocity_ned(self.mavlink_conn, self.system_boot_ms, vn, ve, vd)
-        self._maybe_log(vn, ve, vd)
+        target = self._compute_target_position()
+        if target is None:
+            # Hold current position (or zero) before race / after finish
+            ds = self.shared.drone_state
+            if ds is None:
+                send_position_ned(self.mavlink_conn, self.system_boot_ms, 0.0, 0.0, 0.0)
+            else:
+                send_position_ned(self.mavlink_conn, self.system_boot_ms, ds.north_m, ds.east_m, ds.down_m)
+        else:
+            send_position_ned(self.mavlink_conn, self.system_boot_ms, *target)
+        self._maybe_log(target)
         time.sleep(1.0 / CONTROL_HZ)
 
     def _maybe_rearm(self):
@@ -57,35 +63,25 @@ class Controller:
         send_arm(self.mavlink_conn)
         self._last_arm_t = now
 
-    def _compute_velocity(self) -> tuple[float, float, float]:
-        """Return (vn, ve, vd) m/s in NED. Zero if we lack data or race isn't live."""
+    def _compute_target_position(self) -> tuple[float, float, float] | None:
+        """Return (n, e, d) target position. None if we should hold."""
         ds = self.shared.drone_state
         td = self.shared.track_data
         rs = self.shared.race_status
 
         if ds is None or td is None or rs is None:
-            return 0.0, 0.0, 0.0
+            return None
 
-        # Don't move before the race officially starts — early motion = DQ.
         if not rs.race_started:
-            return 0.0, 0.0, 0.0
+            return None
 
         if rs.race_finished or rs.active_gate_index >= len(td.gates):
-            return 0.0, 0.0, 0.0
+            return None
 
         gate = td.gates[rs.active_gate_index]
-        dn = gate.north_m - ds.north_m
-        de = gate.east_m - ds.east_m
-        dd = gate.down_m - ds.down_m
+        return gate.north_m, gate.east_m, gate.down_m
 
-        dist = math.sqrt(dn * dn + de * de + dd * dd)
-        if dist < 0.1:
-            return 0.0, 0.0, 0.0
-
-        scale = CRUISE_SPEED_MPS / dist
-        return dn * scale, de * scale, dd * scale
-
-    def _maybe_log(self, vn: float, ve: float, vd: float):
+    def _maybe_log(self, target):
         now = time.time()
         if now - self._last_log_t < LOG_PERIOD_S:
             return
@@ -111,5 +107,5 @@ class Controller:
             if rs else "race=None"
         )
         hb_str = f"armed={hb.armed}" if hb else "hb=None"
-        vel_str = f"vel=({vn:.2f},{ve:.2f},{vd:.2f})"
-        print(f"  {ds_str}  {rs_str}  {hb_str}  {vel_str}", flush=True)
+        tgt_str = f"tgt=({target[0]:.1f},{target[1]:.1f},{target[2]:.1f})" if target else "tgt=None"
+        print(f"  {ds_str}  {rs_str}  {hb_str}  {tgt_str}", flush=True)

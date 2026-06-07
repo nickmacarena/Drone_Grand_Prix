@@ -38,6 +38,36 @@ def send_velocity_ned(mavlink_conn, system_boot_ms, vn, ve, vd):
     )
 
 
+# Bitmask for SET_POSITION_TARGET_LOCAL_NED to use position only
+# (ignore velocity, acceleration, yaw, and yaw rate).
+POSITION_ONLY_MASK = (
+    mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
+    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+)
+
+
+def send_position_ned(mavlink_conn, system_boot_ms, n, e, d):
+    """Send a NED position target. Sim handles trajectory if it supports position mode."""
+    now_ms = int(time.time() * 1000)
+    mavlink_conn.mav.set_position_target_local_ned_send(
+        now_ms - system_boot_ms,
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        POSITION_ONLY_MASK,
+        n, e, d,              # position NED
+        0.0, 0.0, 0.0,        # velocity (ignored)
+        0.0, 0.0, 0.0,        # acceleration (ignored)
+        0.0, 0.0,             # yaw, yaw_rate (ignored)
+    )
+
+
 def send_attitude_rates(mavlink_conn, system_boot_ms, roll_rate, pitch_rate, yaw_rate, thrust):
     """Send body rate + thrust attitude command. Ignores attitude quaternion."""
     now_ms = int(time.time() * 1000)
