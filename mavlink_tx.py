@@ -85,6 +85,28 @@ def send_attitude_rates(mavlink_conn, system_boot_ms, roll_rate, pitch_rate, yaw
     )
 
 
+def send_attitude_quaternion(mavlink_conn, system_boot_ms, q, thrust):
+    """Send target attitude quaternion + thrust. Ignores body rates.
+
+    q is [w, x, y, z] for the desired attitude in NED.
+    """
+    now_ms = int(time.time() * 1000)
+    mask = (
+        mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_ROLL_RATE_IGNORE
+        | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_PITCH_RATE_IGNORE
+        | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_YAW_RATE_IGNORE
+    )
+    mavlink_conn.mav.set_attitude_target_send(
+        now_ms - system_boot_ms,
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        mask,
+        q,
+        0.0, 0.0, 0.0,  # rates (ignored)
+        thrust,
+    )
+
+
 def send_arm(mavlink_conn):
     """Arm the drone."""
     mavlink_conn.mav.command_long_send(
