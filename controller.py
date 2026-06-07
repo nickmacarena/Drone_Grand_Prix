@@ -19,6 +19,7 @@ from state import SharedState
 
 CONTROL_HZ = 250
 CRUISE_SPEED_MPS = 3.0
+LOG_PERIOD_S = 1.0
 
 
 class Controller:
@@ -26,6 +27,7 @@ class Controller:
         self.mavlink_conn = mavlink_conn
         self.shared = shared
         self.system_boot_ms = system_boot_ms
+        self._last_log_t = 0.0
 
     def arm(self):
         send_arm(self.mavlink_conn)
@@ -33,6 +35,7 @@ class Controller:
     def update(self):
         vn, ve, vd = self._compute_velocity()
         send_velocity_ned(self.mavlink_conn, self.system_boot_ms, vn, ve, vd)
+        self._maybe_log(vn, ve, vd)
         time.sleep(1.0 / CONTROL_HZ)
 
     def _compute_velocity(self) -> tuple[float, float, float]:
@@ -59,3 +62,26 @@ class Controller:
 
         scale = CRUISE_SPEED_MPS / dist
         return dn * scale, de * scale, dd * scale
+
+    def _maybe_log(self, vn: float, ve: float, vd: float):
+        now = time.time()
+        if now - self._last_log_t < LOG_PERIOD_S:
+            return
+        self._last_log_t = now
+
+        ds = self.shared.drone_state
+        td = self.shared.track_data
+        rs = self.shared.race_status
+
+        ds_str = (
+            f"pos=({ds.north_m:.1f},{ds.east_m:.1f},{ds.down_m:.1f})"
+            if ds else "pos=None"
+        )
+        td_str = f"gates={len(td.gates)}" if td else "gates=None"
+        rs_str = (
+            f"active={rs.active_gate_index} started={rs.race_started} finished={rs.race_finished}"
+            if rs else "race=None"
+        )
+        vel_str = f"vel=({vn:.2f},{ve:.2f},{vd:.2f})"
+
+        print(f"  {ds_str}  {td_str}  {rs_str}  {vel_str}", flush=True)
