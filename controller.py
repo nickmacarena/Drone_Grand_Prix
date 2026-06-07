@@ -5,9 +5,11 @@ Strategy for VQ1:
     Race status tells us which gate is active.
     Local position tells us where we are.
 
-    Compute a velocity vector toward the active gate, send via
-    SET_POSITION_TARGET_LOCAL_NED. The sim's stabilized controller
-    handles attitude and motor mixing.
+    Phase 1: climb to TAKEOFF_ALT_M.
+    Phase 2: fly velocity vector toward the active gate.
+
+    Sends SET_POSITION_TARGET_LOCAL_NED with velocity-only mask.
+    The sim's stabilized controller handles attitude and motor mixing.
 """
 
 import math
@@ -19,6 +21,8 @@ from state import SharedState
 
 CONTROL_HZ = 250
 CRUISE_SPEED_MPS = 3.0
+TAKEOFF_ALT_M = 3.0  # how high to climb before chasing gates
+TAKEOFF_SPEED_MPS = 2.0
 LOG_PERIOD_S = 1.0
 
 
@@ -28,6 +32,7 @@ class Controller:
         self.shared = shared
         self.system_boot_ms = system_boot_ms
         self._last_log_t = 0.0
+        self._logged_gates = False
 
     def arm(self):
         send_arm(self.mavlink_conn)
@@ -39,7 +44,7 @@ class Controller:
         time.sleep(1.0 / CONTROL_HZ)
 
     def _compute_velocity(self) -> tuple[float, float, float]:
-        """Return (vn, ve, vd) m/s in NED. Zero if we lack data."""
+        """Return (vn, ve, vd) m/s in NED."""
         ds = self.shared.drone_state
         td = self.shared.track_data
         rs = self.shared.race_status
@@ -47,11 +52,16 @@ class Controller:
         if ds is None or td is None or rs is None:
             return 0.0, 0.0, 0.0
 
+        # Takeoff phase: climb until we're above TAKEOFF_ALT_M.
+        # In NED, down is positive, so altitude = -down_m.
+        altitude_m = -ds.down_m
+        if altitude_m < TAKEOFF_ALT_M:
+            return 0.0, 0.0, -TAKEOFF_SPEED_MPS  # negative vd = up
+
         if rs.race_finished or rs.active_gate_index >= len(td.gates):
             return 0.0, 0.0, 0.0
 
         gate = td.gates[rs.active_gate_index]
-
         dn = gate.north_m - ds.north_m
         de = gate.east_m - ds.east_m
         dd = gate.down_m - ds.down_m
@@ -72,6 +82,13 @@ class Controller:
         ds = self.shared.drone_state
         td = self.shared.track_data
         rs = self.shared.race_status
+
+        # One-time gate dump when track data first arrives
+        if td and not self._logged_gates:
+            print(f"  Track has {len(td.gates)} gates:", flush=True)
+            for g in td.gates:
+                print(f"    gate {g.gate_id}: ({g.north_m:.1f}, {g.east_m:.1f}, {g.down_m:.1f})", flush=True)
+            self._logged_gates = True
 
         ds_str = (
             f"pos=({ds.north_m:.1f},{ds.east_m:.1f},{ds.down_m:.1f})"
