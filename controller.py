@@ -17,6 +17,9 @@ TEST_THRUST = 0.6
 LOG_PERIOD_S = 1.0
 
 
+REARM_PERIOD_S = 0.5
+
+
 class Controller:
     def __init__(self, mavlink_conn, shared: SharedState, system_boot_ms: int):
         self.mavlink_conn = mavlink_conn
@@ -24,15 +27,29 @@ class Controller:
         self.system_boot_ms = system_boot_ms
         self._last_log_t = 0.0
         self._logged_gates = False
+        self._last_arm_t = 0.0
 
     def arm(self):
         send_arm(self.mavlink_conn)
+        self._last_arm_t = time.time()
 
     def update(self):
+        self._maybe_rearm()
         # Zero rates, thrust=0.6. Should make the drone hover/climb.
         send_attitude_rates(self.mavlink_conn, self.system_boot_ms, 0.0, 0.0, 0.0, TEST_THRUST)
         self._maybe_log()
         time.sleep(1.0 / CONTROL_HZ)
+
+    def _maybe_rearm(self):
+        """Re-arm if the sim has disarmed us (happens on race transition)."""
+        hb = self.shared.heartbeat
+        if hb is None or hb.armed:
+            return
+        now = time.time()
+        if now - self._last_arm_t < REARM_PERIOD_S:
+            return
+        send_arm(self.mavlink_conn)
+        self._last_arm_t = now
 
     def _maybe_log(self):
         now = time.time()
