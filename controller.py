@@ -58,12 +58,16 @@ class Controller:
         self._last_arm_t = now
 
     def _compute_velocity(self) -> tuple[float, float, float]:
-        """Return (vn, ve, vd) m/s in NED. Zero if we lack data."""
+        """Return (vn, ve, vd) m/s in NED. Zero if we lack data or race isn't live."""
         ds = self.shared.drone_state
         td = self.shared.track_data
         rs = self.shared.race_status
 
         if ds is None or td is None or rs is None:
+            return 0.0, 0.0, 0.0
+
+        # Don't move before the race officially starts — early motion = DQ.
+        if not rs.race_started:
             return 0.0, 0.0, 0.0
 
         if rs.race_finished or rs.active_gate_index >= len(td.gates):
