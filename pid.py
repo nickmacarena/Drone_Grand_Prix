@@ -27,23 +27,22 @@ from measurements import (
 
 
 # ─── Loop gains ───────────────────────────────────────────────────────
-# Position loop: position error → desired velocity (m/s per m).
-# Bandwidth ~1 rad/s → KP_POS ≈ 1.0
-KP_POS = 1.0
+# Conservative — first time flying a real course. Tune up once stable.
+KP_POS = 0.4
+KP_VEL = 1.5
+KD_VEL = 1.0
 
-# Velocity loop: velocity error → desired acceleration (m/s² per m/s).
-# Bandwidth ~3 rad/s → KP_VEL ≈ 3.0
-# Damping: don't need much; sim has its own dynamics
-KP_VEL = 3.0
-KD_VEL = 1.0  # provides damping against position-loop output
+# Speed cap. Max horizontal accel is ~g (limited by tilt), so high target
+# speeds just cause saturation. Keep this low for stability.
+MAX_SPEED_MPS = 4.0
 
-# Yaw loop: yaw error → yaw setpoint (rad).
-# We compute target yaw and just set it; sim's inner loop tracks.
-# No gain needed — target yaw IS the command.
+# Cap on commanded acceleration magnitude (per-axis). Prevents the velocity
+# loop from asking for impossibilities when the position loop saturates.
+MAX_ACCEL_MPSS = 6.0
 
-# Speed cap on the velocity setpoint — prevents the outer loop from
-# asking for unattainable speeds when far from the target.
-MAX_SPEED_MPS = 8.0
+# Yaw is only worth tracking when the drone is far from the target.
+# Close to target, the bearing direction flips around and confuses things.
+YAW_TRACK_DIST_M = 3.0
 
 
 def position_to_velocity(target_pos, current_pos) -> tuple[float, float, float]:
@@ -73,11 +72,14 @@ def velocity_to_acceleration(target_vel, current_vel) -> tuple[float, float, flo
     ee = target_vel[1] - current_vel[1]
     ed = target_vel[2] - current_vel[2]
 
-    # P term: drive toward target velocity
-    # D term: brake on current velocity (acts as damping against position loop)
     an = KP_VEL * en - KD_VEL * current_vel[0]
     ae = KP_VEL * ee - KD_VEL * current_vel[1]
     ad = KP_VEL * ed - KD_VEL * current_vel[2]
+
+    # Cap per-axis to avoid asking for impossibilities
+    an = clamp(an, -MAX_ACCEL_MPSS, MAX_ACCEL_MPSS)
+    ae = clamp(ae, -MAX_ACCEL_MPSS, MAX_ACCEL_MPSS)
+    ad = clamp(ad, -MAX_ACCEL_MPSS, MAX_ACCEL_MPSS)
 
     return an, ae, ad
 
@@ -129,10 +131,16 @@ def compute_attitude_target(
     # Middle: velocity → acceleration
     target_accel = velocity_to_acceleration(target_vel, current_vel)
 
-    # Yaw target: face the gate in the NED horizontal plane
+    # Yaw target: only chase when the drone is far from the target.
+    # Close to the target, the bearing direction flips around and the
+    # drone tries to spin in place, destabilizing everything.
     dn = target_pos[0] - current_pos[0]
     de = target_pos[1] - current_pos[1]
-    target_yaw = math.atan2(de, dn) if (dn * dn + de * de) > 0.01 else drone_state.yaw_rad
+    horiz_dist_sq = dn * dn + de * de
+    if horiz_dist_sq > YAW_TRACK_DIST_M * YAW_TRACK_DIST_M:
+        target_yaw = math.atan2(de, dn)
+    else:
+        target_yaw = drone_state.yaw_rad  # hold current yaw
 
     # Inner conversion: acceleration → attitude+thrust
     return acceleration_to_attitude(target_accel, target_yaw)
