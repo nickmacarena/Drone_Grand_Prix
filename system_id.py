@@ -98,10 +98,11 @@ def run_for(mavlink_conn, shared, system_boot_ms, duration_s, attitude, sample_l
 
 
 def test_hover_thrust(mavlink_conn, shared, system_boot_ms):
-    status("[1/3] hover thrust sweep")
+    status("[1/3] hover thrust sweep (~12s)")
     log("\n=== TEST 1: hover thrust sweep ===")
     results = {}
     for thrust in (0.40, 0.45, 0.50, 0.55, 0.60):
+        status(f"      thrust={thrust:.2f}")
         log(f"  thrust={thrust:.2f} for 2.5s ...")
         samples = []
         run_for(
