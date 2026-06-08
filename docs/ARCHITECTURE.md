@@ -12,12 +12,15 @@ This shaped the whole design. Read it first.
 
 - **Track layout** — the sim sends a complete list of gates (id, position NED, orientation, width, height) once at the start, via `ENCAPSULATED_DATA` chunked transfer.
 - **Active gate index** — the sim tells us which gate is next via `RACE_STATUS` messages.
-- **Position telemetry** — `LOCAL_POSITION_NED` gives us local position and velocity. No GPS needed.
+- **Position telemetry** — `LOCAL_POSITION_NED` gives us local position and velocity.
 - **Attitude telemetry** — `ATTITUDE` gives roll/pitch/yaw (radians) and rates.
 - **Collision feedback** — `COLLISION` messages flag gate hits (id 1001) or environment hits (id 1002).
-- **Three control levels** — position/velocity setpoints (`SET_POSITION_TARGET_LOCAL_NED`), attitude rates + thrust (`SET_ATTITUDE_TARGET`), or direct motor RPMs (`SET_ACTUATOR_CONTROL_TARGET`).
 
-**For VQ1, this means we do not need computer vision at all.** Track data + race status + position telemetry is enough. Vision becomes relevant for VQ2 (visually complex environments, obstacles).
+**Control interface — what we learned the hard way:**
+
+The MAVLink spec lists three control modes (position/velocity setpoints, attitude+thrust, motor RPMs), but **only attitude+thrust is actually followed** by this sim. `SET_POSITION_TARGET_LOCAL_NED` is accepted but the drone does not track the setpoint — it just falls.
+
+So we send `SET_ATTITUDE_TARGET` with a target quaternion + thrust at 250 Hz. The sim's inner attitude controller tracks the target. Our job: compute the right attitude quaternion + thrust to fly to each gate.
 
 ---
 
@@ -27,45 +30,90 @@ This shaped the whole design. Read it first.
                 ┌──────────────────────────────────────┐
                 │  mavlink_rx (background thread)      │
                 │                                      │
-                │  ATTITUDE          → drone_state     │
-                │  LOCAL_POSITION_NED → drone_state    │
-                │  ENCAPSULATED_DATA → track_data,     │
-                │                      race_status     │
+                │  ATTITUDE             → drone_state  │
+                │  LOCAL_POSITION_NED   → drone_state  │
+                │  HEARTBEAT            → armed/mode   │
+                │  ENCAPSULATED_DATA    → track,       │
+                │                         race_status  │
                 └──────────────┬───────────────────────┘
-                               │
                                ▼
                        ┌────────────────┐
                        │  SharedState   │
                        └───────┬────────┘
-                               │
                                ▼
-            ┌──────────────────────────────────┐
-            │  controller.update()  (250 Hz)   │
-            │                                  │
-            │  1. Read active gate from        │
-            │     race_status                  │
-            │  2. Look up gate position in     │
-            │     track_data                   │
-            │  3. Compute velocity vector      │
-            │     from drone to gate           │
-            │  4. Send SET_POSITION_TARGET_    │
-            │     LOCAL_NED with velocity      │
-            └──────────────────────────────────┘
+            ┌──────────────────────────────────────┐
+            │   controller.update()  (250 Hz)      │
+            │                                      │
+            │   1. Re-arm if sim disarmed us       │
+            │   2. Active gate position → target   │
+            │   3. pid.compute_attitude_target()   │
+            │      ↓ cascaded loops ↓              │
+            │      position → velocity             │
+            │      velocity → acceleration         │
+            │      acceleration → (q, thrust)      │
+            │   4. SET_ATTITUDE_TARGET             │
+            └──────────────────────────────────────┘
 ```
 
-Vision and timesync run as background threads but don't feed the VQ1 control loop. Vision populates `SharedState.latest_frame` for future use.
+Vision, timesync, heartbeat run as background threads. Vision is wired but unused for VQ1.
+
+---
+
+## Cascaded PID Controller
+
+```
+target gate (NED)
+    │
+    ▼
+┌──────────────────────────────────┐
+│ POSITION LOOP    (P)             │
+│ pos_error → desired_velocity     │  ~10 Hz bandwidth
+└──────────────┬───────────────────┘
+               ▼
+┌──────────────────────────────────┐
+│ VELOCITY LOOP    (PD)            │
+│ vel_error → desired_acceleration │  ~30 Hz bandwidth
+└──────────────┬───────────────────┘
+               ▼
+┌──────────────────────────────────┐
+│ ACCEL → ATTITUDE conversion      │
+│ desired_accel + target_yaw →     │  algebraic
+│   (q_target, thrust)             │
+└──────────────┬───────────────────┘
+               ▼
+        SET_ATTITUDE_TARGET (250 Hz)
+        sim's inner loop tracks quaternion
+```
+
+**Why cascaded:** each loop has a clean job. Position loop says "go here." Velocity loop adds damping. Accel→attitude conversion handles gravity properly. Gains are tunable per loop, not magic.
+
+**Why P/PD and not PID:** integral terms accumulate error and add complexity. For a deterministic sim with no steady-state disturbances, P/PD is usually enough. Add I terms only if we observe persistent steady-state error.
+
+---
+
+## System Identification
+
+Before tuning the cascaded controller, we measure key drone parameters with `system_id.py`. This runs as a standalone script — not part of the race pipeline.
+
+What we measure:
+
+1. **Hover thrust** — the thrust value where vertical velocity stabilizes at 0.
+2. **Attitude inner-loop response** — when we command pitch=X, how long until the drone reaches X, and is there overshoot?
+3. **Thrust → acceleration mapping** — vertical thrust gain (m/s² per unit thrust above hover) and tilt → horizontal acceleration gain.
+
+The measurements live in `measurements.py` as constants. `pid.py` reads them. We re-run system ID when the sim version changes or we suspect drift.
 
 ---
 
 ## Design Principles
 
-**Mirror the AIGP example structure.** Teammates can reference the official example one-to-one. File names and roles match.
-
-**Pure logic separate from threading.** `controller._compute_velocity()` is a pure function of `SharedState` and is testable. The threaded plumbing (`mavlink_rx`, `vision_rx`, `timesync`) is isolated.
+**Pure logic separate from threading.** Pipeline math lives in `pid.py` and `attitude.py` as pure functions — testable without the sim. Threaded plumbing is isolated in the `*_rx`, `*_tx`, `timesync`, `heartbeat` modules.
 
 **Frozen dataclasses for state.** Each field of `SharedState` holds an immutable dataclass replaced atomically by the rx thread. CPython's GIL makes single-field assignment safe — no explicit locks needed.
 
-**No premature complexity.** Start with velocity setpoints and trust the sim's stabilized controller. Move to attitude or motor-level control only if we hit a performance ceiling.
+**Mirror the AIGP example file names where possible.** Teammates can cross-reference the official example.
+
+**Measure before tuning.** Gains derived from measured parameters, not guesses.
 
 ---
 
@@ -73,23 +121,24 @@ Vision and timesync run as background threads but don't feed the VQ1 control loo
 
 ```
 Drone_Grand_Prix/
-├── main.py                # entry point
-├── setup.py               # wires components together (mirrors example)
-├── controller.py          # 250 Hz control loop, computes velocity toward active gate
-├── mavlink_rx.py          # background MAVLink receiver → SharedState
-├── mavlink_tx.py          # MAVLink command senders
-├── vision_rx.py           # background camera receiver (stub for VQ1)
-├── timesync.py            # background TIMESYNC sender
-├── state.py               # data types and SharedState container
-├── requirements.txt
-├── README.md
-├── VQ1_tech_specs.pdf
+├── main.py              # entry point — connect, run control loop
+├── setup.py             # wires components, starts background threads
+├── state.py             # frozen dataclasses + SharedState
+├── controller.py        # 250 Hz loop, thin — calls into pid.py
+├── pid.py               # cascaded PID, pure functions
+├── attitude.py          # quaternion + frame math, pure functions
+├── measurements.py      # measured drone parameters (from system_id.py)
+├── system_id.py         # standalone measurement script (not in race pipeline)
+├── mavlink_rx.py        # background MAVLink receiver → SharedState
+├── mavlink_tx.py        # MAVLink command senders
+├── timesync.py          # background TIMESYNC sender
+├── heartbeat.py         # background HEARTBEAT sender (1 Hz)
+├── vision_rx.py         # background camera receiver (unused for VQ1)
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── JOURNAL.md
 │   └── LOCAL_DEV_SETUP.md
-├── tests/
-└── legacy/                # pre-sim code based on wrong assumptions; do not extend
+└── legacy/              # pre-sim code based on wrong assumptions; do not extend
 ```
 
 ---
@@ -102,9 +151,11 @@ Drone_Grand_Prix/
 
 **`TrackData`** — tuple of all `Gate`s. Sent once at race start.
 
-**`RaceStatus`** — active gate index, race started/finished flags, last gate time. From `ENCAPSULATED_DATA` race status messages.
+**`RaceStatus`** — active gate index, race started/finished flags, last gate time. From `ENCAPSULATED_DATA` race status. `race_started` is true once `sim_boot_time >= race_start_time` (not just when start is *scheduled*).
 
-**`SharedState`** — mutable container with `drone_state`, `track_data`, `race_status`, `latest_frame`. Background threads write, control loop reads.
+**`HeartbeatStatus`** — armed flag, base_mode, custom_mode, system_status. From `HEARTBEAT`.
+
+**`SharedState`** — mutable container. Background threads write, control loop reads.
 
 ---
 
@@ -112,46 +163,54 @@ Drone_Grand_Prix/
 
 - **Main thread** — runs the control loop, calls `controller.update()` at 250 Hz.
 - **`mavlink_rx` thread** — receives all MAVLink messages, updates `SharedState`.
-- **`vision_rx` thread** — receives camera frames over UDP 5600, updates `SharedState.latest_frame`.
+- **`vision_rx` thread** — receives camera frames over UDP 5600, updates `SharedState.latest_frame`. (Wired but unused for VQ1.)
 - **`timesync` thread** — sends `TIMESYNC` to the sim at 10 Hz.
+- **`heartbeat` thread** — sends `HEARTBEAT` from our side at 1 Hz (MAVLink protocol requirement).
 
 All background threads expose `get_thread_for_join()` for clean shutdown.
 
 ---
 
+## Sim-specific protocol notes
+
+- **The sim disarms us at the race-start transition.** Our controller re-arms whenever it sees `armed=False`. Rate-limited so we don't spam.
+- **Don't send non-zero attitude/thrust before `race_started=True`.** Early motion = DQ. We hold thrust=0 pre-race.
+- **`race_started` is true only when sim time has reached the scheduled start**, not when the start is scheduled. We compare `sim_boot_ms` against `race_start_boot_ms`.
+
+---
+
 ## Development Phasing
 
-### Phase 1 — VQ1 baseline (current)
-- Velocity setpoint toward active gate
-- No vision
-- Goal: complete the VQ1 course
+### Phase 1 — Foundations
+- ✅ Pipeline, networking, telemetry, gate sequencing
+- ✅ Confirm only attitude+thrust is followed by sim
+- ✅ Re-arming + race-start handling
 
-### Phase 2 — VQ1 tuning
-- Smarter gate approach (use gate orientation to align before passing)
-- Look ahead to next gate to smooth turns
-- Handle race start/finish edge cases
+### Phase 2 — System ID + cascaded controller (current)
+- Run `system_id.py` to measure hover thrust + attitude response
+- Implement `pid.py` with three nested loops
+- Get through VQ1 reliably
 
 ### Phase 3 — VQ2 perception
 - Wire vision into the control loop
-- Detect gates in camera frames
+- Detect gates in camera frames (high-contrast, classical CV likely works)
 - Use vision to refine gate positions or detect obstacles
 
 ### Phase 4 — Performance
-- Move from velocity to attitude or motor control if needed for speed
-- Tune for fastest time (VQ2 scoring)
+- Trajectory planning across multiple gates (not one-at-a-time targeting)
+- Possibly MPC for VQ2 fastest-time scoring
 
 ---
 
 ## Competition Constraints
 
-- **Control output:** velocity/position, attitude rates+thrust, or motor RPMs
+- **Control output:** attitude+thrust only (sim ignores position/velocity setpoints)
 - **Telemetry inputs:** ATTITUDE, LOCAL_POSITION_NED, ODOMETRY, HIGHRES_IMU, plus custom race/track data
 - **No GPS, no absolute positioning, no depth sensor**
 - **Monocular FPV camera** via UDP 5600 (JPEG, chunked)
 - **Gates must be passed in correct order** — sim provides `active_gate_index`
 - **Full 3D course with elevation changes**
 - **Max run time:** 8 minutes
-- **No human interaction during runs**
 - **Sim platform:** Windows only, requires internet (anti-cheat)
 - **VQ1:** < 10 gates, focus on completion
 - **VQ2:** < 20 gates, visually complex, fastest time wins
@@ -160,7 +219,7 @@ All background threads expose `get_thread_for_join()` for clean shutdown.
 
 ## Open Questions
 
-- How accurate is `LOCAL_POSITION_NED` vs. ground truth? If noisy, may need to fuse with ODOMETRY.
-- Does the active gate index change as soon as we pass through, or with a delay?
-- Gate orientation — does it indicate the approach direction or the gate plane normal?
-- For VQ2, will track data still be provided, or will perception be required?
+- Gate orientation — does it indicate approach direction or gate plane normal?
+- How accurate is `LOCAL_POSITION_NED` vs. ground truth? Need to check noise level.
+- Does the sim accept attitude commands during the pre-race lobby? Or only after race_started?
+- For VQ2, will track data still be provided, or will perception be required to find gates?
