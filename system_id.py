@@ -34,7 +34,7 @@ LOOP_PERIOD = 1.0 / LOOP_HZ
 
 OUTPUT_FILE = "system_id_results.txt"
 
-G = 9.81  # m/s², standard gravity
+G = 9.81  # m/s^2, standard gravity
 
 
 _log_file = None
@@ -120,11 +120,11 @@ def measure_hover_and_thrust_gain(mavlink_conn, shared, system_boot_ms):
         log("  dt error in slope computation")
         return None, None
 
-    accel_down = (vd_m - vd_e) / dt  # m/s² in NED (positive = downward)
+    accel_down = (vd_m - vd_e) / dt  # m/s^2 in NED (positive = downward)
     accel_up = -accel_down
 
     log(f"  Test thrust: {test_thrust:.3f}")
-    log(f"  Measured accel_up: {accel_up:.2f} m/s²")
+    log(f"  Measured accel_up: {accel_up:.2f} m/s^2")
 
     # Force balance: accel_up = g * (T - T_hover) / T_hover
     # → T_hover = g * T / (accel_up + g)
@@ -133,8 +133,8 @@ def measure_hover_and_thrust_gain(mavlink_conn, shared, system_boot_ms):
     # Vertical accel per unit thrust above hover = g / hover
     accel_per_unit = G / hover if hover > 0 else None
 
-    log(f"  >>> HOVER_THRUST ≈ {hover:.3f}")
-    log(f"  >>> VERTICAL_ACCEL_PER_UNIT_THRUST ≈ {accel_per_unit:.1f}")
+    log(f"  >>> HOVER_THRUST ~ {hover:.3f}")
+    log(f"  >>> VERTICAL_ACCEL_PER_UNIT_THRUST ~ {accel_per_unit:.1f}")
     return hover, accel_per_unit
 
 
@@ -174,13 +174,13 @@ def measure_attitude_response(mavlink_conn, shared, system_boot_ms, hover_thrust
     log(f"  Commanded pitch: 15.0°")
     log(f"  Rise time to 90% (13.5°): {rise_t}")
     log(f"  Overshoot: {math.degrees(overshoot):.1f}°")
-    log(f"  >>> ATTITUDE_RISE_TIME_S ≈ {rise_t}")
+    log(f"  >>> ATTITUDE_RISE_TIME_S ~ {rise_t}")
     return rise_t
 
 
 def main():
     global _log_file
-    _log_file = open(OUTPUT_FILE, "w")
+    _log_file = open(OUTPUT_FILE, "w", encoding="utf-8")
 
     status(f"system_id starting — detailed log in {OUTPUT_FILE}")
     log(f"system_id run at {time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -218,11 +218,13 @@ def main():
     hover, accel_per_unit = measure_hover_and_thrust_gain(mavlink_conn, shared, system_boot_ms)
     rise_t = measure_attitude_response(mavlink_conn, shared, system_boot_ms, hover)
 
-    log("\n\n========== RESULTS ==========")
-    log(f"HOVER_THRUST                       = {hover}")
-    log(f"VERTICAL_ACCEL_PER_UNIT_THRUST     = {accel_per_unit}")
-    log(f"ATTITUDE_RISE_TIME_S               = {rise_t}")
-    log("\nCopy these into measurements.py.")
+    status("")
+    status("========== RESULTS ==========")
+    status(f"HOVER_THRUST                       = {hover}")
+    status(f"VERTICAL_ACCEL_PER_UNIT_THRUST     = {accel_per_unit}")
+    status(f"ATTITUDE_RISE_TIME_S               = {rise_t}")
+    status("")
+    status("Copy these into measurements.py.")
 
     # Cut thrust
     run_for(mavlink_conn, shared, system_boot_ms, 1.0, (0.0, 0.0, 0.0, 0.0))
