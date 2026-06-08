@@ -216,18 +216,25 @@ def main():
     mavlink_conn = components["mavlink_conn"]
     shared = components["shared"]
 
-    status("arming and waiting for telemetry")
+    # The sim only starts streaming position/attitude AFTER you click RACE.
+    # So system ID consumes one race attempt. That's fine — VQ1 has unlimited attempts.
+    status("CLICK RACE IN THE SIM to start system ID. Waiting up to 60s for telemetry...")
     send_arm(mavlink_conn)
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0
+    last_arm = time.time()
     while time.time() < deadline:
-        if shared.heartbeat and shared.heartbeat.armed and shared.drone_state is not None:
+        if shared.drone_state is not None and shared.heartbeat and shared.heartbeat.armed:
             break
-        send_arm(mavlink_conn)
-        time.sleep(0.3)
+        if time.time() - last_arm >= 0.5:
+            send_arm(mavlink_conn)
+            last_arm = time.time()
+        time.sleep(0.05)
     else:
-        status("FAILED: did not get armed + telemetry. See log.")
+        status("FAILED: no telemetry. Did you click RACE? See log.")
         _log_file.close()
         return
+
+    status("telemetry received — running tests now")
 
     hover = test_hover_thrust(mavlink_conn, shared, system_boot_ms)
     rise_t = test_attitude_response(mavlink_conn, shared, system_boot_ms)

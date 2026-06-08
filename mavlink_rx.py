@@ -147,24 +147,10 @@ class MAVLinkRX:
         )
 
     def _on_command_ack(self, msg):
-        # Always print — these are rare and informative
-        result_names = {
-            0: "ACCEPTED",
-            1: "TEMPORARILY_REJECTED",
-            2: "DENIED",
-            3: "UNSUPPORTED",
-            4: "FAILED",
-            5: "IN_PROGRESS",
-            6: "CANCELLED",
-        }
-        result_str = result_names.get(msg.result, f"RESULT_{msg.result}")
-        print(f"  [COMMAND_ACK] cmd={msg.command} result={result_str}", flush=True)
+        # Silent — these were noisy debugging output and we've moved past needing them.
+        # Re-enable by logging to a file if needed.
+        pass
 
     def _on_statustext(self, msg):
-        severity_names = {
-            0: "EMERGENCY", 1: "ALERT", 2: "CRITICAL", 3: "ERROR",
-            4: "WARNING", 5: "NOTICE", 6: "INFO", 7: "DEBUG",
-        }
-        sev_str = severity_names.get(msg.severity, f"SEV_{msg.severity}")
-        text = msg.text.decode("utf-8", errors="replace") if isinstance(msg.text, bytes) else msg.text
-        print(f"  [STATUSTEXT {sev_str}] {text}", flush=True)
+        # Silent. Re-enable if the sim starts complaining about anything.
+        pass
