@@ -21,6 +21,7 @@ heartbeat received) but before clicking RACE.
 """
 
 import math
+import sys
 import time
 
 from attitude import euler_to_quaternion
@@ -33,6 +34,26 @@ SIM_SERVER_UDP_PORT = 14550
 
 LOOP_HZ = 250
 LOOP_PERIOD = 1.0 / LOOP_HZ
+
+OUTPUT_FILE = "system_id_results.txt"
+
+
+# Detailed output goes to file; only minimal progress to terminal.
+_log_file = None
+
+
+def log(msg: str = ""):
+    """Write to results file; never to terminal."""
+    if _log_file is not None:
+        _log_file.write(msg + "\n")
+        _log_file.flush()
+
+
+def status(msg: str):
+    """One-line terminal status."""
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+    log(msg)
 
 
 def sample_state(shared):
@@ -77,10 +98,11 @@ def run_for(mavlink_conn, shared, system_boot_ms, duration_s, attitude, sample_l
 
 
 def test_hover_thrust(mavlink_conn, shared, system_boot_ms):
-    print("\n=== TEST 1: hover thrust sweep ===", flush=True)
+    status("[1/3] hover thrust sweep")
+    log("\n=== TEST 1: hover thrust sweep ===")
     results = {}
     for thrust in (0.40, 0.45, 0.50, 0.55, 0.60):
-        print(f"  thrust={thrust:.2f} for 2.5s ...", flush=True)
+        log(f"  thrust={thrust:.2f} for 2.5s ...")
         samples = []
         run_for(
             mavlink_conn, shared, system_boot_ms,
@@ -88,39 +110,37 @@ def test_hover_thrust(mavlink_conn, shared, system_boot_ms):
             attitude=(0.0, 0.0, 0.0, thrust),
             sample_log=samples,
         )
-        # Use the last 1 second of vertical velocity samples
         if not samples:
-            print("    no samples", flush=True)
+            log("    no samples")
             continue
         recent = [ds.vd_mps for t, ds in samples if t >= 1.5]
         if not recent:
             recent = [samples[-1][1].vd_mps]
         mean_vd = sum(recent) / len(recent)
         results[thrust] = mean_vd
-        print(f"    terminal vd ≈ {mean_vd:+.2f} m/s", flush=True)
+        log(f"    terminal vd ≈ {mean_vd:+.2f} m/s")
 
-    # Linear-interpolate to find vd = 0
     keys = sorted(results.keys())
     hover = None
     for a, b in zip(keys, keys[1:]):
-        if results[a] * results[b] <= 0:  # sign change
+        if results[a] * results[b] <= 0:
             t = results[a] / (results[a] - results[b])
             hover = a + t * (b - a)
             break
     if hover is not None:
-        print(f"\n  >>> HOVER_THRUST ≈ {hover:.3f}", flush=True)
+        log(f"\n  >>> HOVER_THRUST ≈ {hover:.3f}")
     else:
-        print("\n  >>> Could not bracket hover thrust. Widen the sweep.", flush=True)
+        log("\n  >>> Could not bracket hover thrust. Widen the sweep.")
     return hover
 
 
 def test_attitude_response(mavlink_conn, shared, system_boot_ms):
-    print("\n=== TEST 2: attitude step response (pitch 20°) ===", flush=True)
-    # Hold level briefly, then command 20° pitch and measure.
-    print("  pre-step level for 1s", flush=True)
+    status("[2/3] attitude step response")
+    log("\n=== TEST 2: attitude step response (pitch 20°) ===")
+    log("  pre-step level for 1s")
     run_for(mavlink_conn, shared, system_boot_ms, 1.0, (0.0, 0.0, 0.0, 0.5))
 
-    print("  step to pitch=20° for 2s ...", flush=True)
+    log("  step to pitch=20° for 2s ...")
     samples = []
     target = math.radians(20.0)
     run_for(
@@ -131,10 +151,9 @@ def test_attitude_response(mavlink_conn, shared, system_boot_ms):
     )
 
     if not samples:
-        print("  no samples", flush=True)
+        log("  no samples")
         return None
 
-    # Rise time to 90% of target
     threshold = 0.9 * target
     rise_t = None
     overshoot = 0.0
@@ -143,19 +162,20 @@ def test_attitude_response(mavlink_conn, shared, system_boot_ms):
             rise_t = t
         overshoot = max(overshoot, ds.pitch_rad - target)
 
-    print(f"\n  >>> rise time to 90% (18°): {rise_t}", flush=True)
-    print(f"  >>> overshoot beyond target: {math.degrees(overshoot):.1f}°", flush=True)
+    log(f"\n  >>> rise time to 90% (18°): {rise_t}")
+    log(f"  >>> overshoot beyond target: {math.degrees(overshoot):.1f}°")
     return rise_t
 
 
 def test_thrust_to_accel(mavlink_conn, shared, system_boot_ms, hover_thrust):
-    print("\n=== TEST 3: thrust → vertical acceleration ===", flush=True)
+    status("[3/3] thrust → vertical accel")
+    log("\n=== TEST 3: thrust → vertical acceleration ===")
     if hover_thrust is None:
-        print("  skipping — no hover thrust measured", flush=True)
+        log("  skipping — no hover thrust measured")
         return None
 
     test_thrust = hover_thrust + 0.10
-    print(f"  thrust={test_thrust:.3f} for 1.5s ...", flush=True)
+    log(f"  thrust={test_thrust:.3f} for 1.5s ...")
     samples = []
     run_for(
         mavlink_conn, shared, system_boot_ms,
@@ -165,10 +185,9 @@ def test_thrust_to_accel(mavlink_conn, shared, system_boot_ms, hover_thrust):
     )
 
     if len(samples) < 4:
-        print("  not enough samples", flush=True)
+        log("  not enough samples")
         return None
 
-    # Look at early-window slope of vd (before drag dominates)
     early = [s for s in samples if s[0] <= 0.6]
     if len(early) < 3:
         early = samples[:5]
@@ -177,26 +196,28 @@ def test_thrust_to_accel(mavlink_conn, shared, system_boot_ms, hover_thrust):
     t1, ds1 = early[-1]
     dt = t1 - t0
     accel_d = (ds1.vd_mps - ds0.vd_mps) / dt if dt > 0 else 0.0
-    accel_up = -accel_d  # positive = upward
+    accel_up = -accel_d
 
     accel_per_unit = accel_up / 0.10
-    print(f"\n  >>> Vertical accel ≈ {accel_up:.2f} m/s² for +0.10 thrust", flush=True)
-    print(f"  >>> VERTICAL_ACCEL_PER_UNIT_THRUST ≈ {accel_per_unit:.1f}", flush=True)
+    log(f"\n  >>> Vertical accel ≈ {accel_up:.2f} m/s² for +0.10 thrust")
+    log(f"  >>> VERTICAL_ACCEL_PER_UNIT_THRUST ≈ {accel_per_unit:.1f}")
     return accel_per_unit
 
 
 def main():
+    global _log_file
+    _log_file = open(OUTPUT_FILE, "w")
+
+    status(f"system_id starting — detailed log in {OUTPUT_FILE}")
+    log(f"system_id run at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
     system_boot_ms = int(time.time() * 1000)
     components = setup_components(SIM_SERVER_UDP_IP, SIM_SERVER_UDP_PORT, system_boot_ms)
     mavlink_conn = components["mavlink_conn"]
     shared = components["shared"]
 
-    # Initial arm
-    print("Arming...", flush=True)
+    status("arming and waiting for telemetry")
     send_arm(mavlink_conn)
-
-    # Wait for armed + telemetry
-    print("Waiting for armed=True and drone_state...", flush=True)
     deadline = time.time() + 10.0
     while time.time() < deadline:
         if shared.heartbeat and shared.heartbeat.armed and shared.drone_state is not None:
@@ -204,27 +225,28 @@ def main():
         send_arm(mavlink_conn)
         time.sleep(0.3)
     else:
-        print("Did not get armed + telemetry. Aborting.", flush=True)
+        status("FAILED: did not get armed + telemetry. See log.")
+        _log_file.close()
         return
-
-    print("Ready. Running system ID...", flush=True)
 
     hover = test_hover_thrust(mavlink_conn, shared, system_boot_ms)
     rise_t = test_attitude_response(mavlink_conn, shared, system_boot_ms)
     accel_per_unit = test_thrust_to_accel(mavlink_conn, shared, system_boot_ms, hover)
 
-    print("\n\n========== RESULTS ==========", flush=True)
-    print(f"HOVER_THRUST                       = {hover}", flush=True)
-    print(f"ATTITUDE_RISE_TIME_S               = {rise_t}", flush=True)
-    print(f"VERTICAL_ACCEL_PER_UNIT_THRUST     = {accel_per_unit}", flush=True)
-    print("\nCopy these into measurements.py.", flush=True)
+    log("\n\n========== RESULTS ==========")
+    log(f"HOVER_THRUST                       = {hover}")
+    log(f"ATTITUDE_RISE_TIME_S               = {rise_t}")
+    log(f"VERTICAL_ACCEL_PER_UNIT_THRUST     = {accel_per_unit}")
+    log("\nCopy these into measurements.py.")
 
-    # Land softly: low thrust, level
-    print("\nCutting thrust...", flush=True)
+    log("\nCutting thrust...")
     run_for(mavlink_conn, shared, system_boot_ms, 2.0, (0.0, 0.0, 0.0, 0.0))
 
     for name in ("mavlink_rx", "timesync", "heartbeat"):
         components[name].get_thread_for_join().join(timeout=1.0)
+
+    _log_file.close()
+    status(f"done — results in {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
