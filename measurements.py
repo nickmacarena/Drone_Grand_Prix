@@ -1,8 +1,7 @@
 """Measured drone parameters.
 
-These come from running system_id.py against the live sim. Initial values
-are rough guesses (clearly labeled). Replace with measured values once
-system ID has been run.
+These come from running system_id.py against the live sim.
+Last measured: 2026-06-08.
 """
 
 import math
@@ -10,33 +9,31 @@ import math
 
 # ─── Hover thrust ─────────────────────────────────────────────────────
 # Thrust value (0..1) where vertical velocity stabilizes at zero.
-# GUESS — replace with measurement from system_id.py
-HOVER_THRUST = 0.50
+# Measured: tested at thrust=0.30, got accel_up=1.13 m/s² →
+#   hover = g * T / (accel_up + g) = 9.81 * 0.30 / (1.13 + 9.81) = 0.269
+HOVER_THRUST = 0.269
 
 
 # ─── Attitude inner-loop response ─────────────────────────────────────
-# Approximate rise time of the sim's attitude controller when given an
-# absolute attitude target. Used to choose outer-loop bandwidth.
-# GUESS — replace with measurement from system_id.py
-ATTITUDE_RISE_TIME_S = 0.20
+# Measured rise time was 1.3 ms (faster than our 50 Hz sampler — sim's
+# attitude inner loop is essentially instantaneous to us). True value
+# is < 20 ms. Use a conservative 50 ms for outer-loop bandwidth planning.
+ATTITUDE_RISE_TIME_S = 0.05
 
 
 # ─── Thrust → vertical acceleration ───────────────────────────────────
 # Vertical acceleration (m/s²) per unit thrust above hover.
-# A drone at 1.5× thrust-to-weight has ~5 m/s² spare at full thrust →
-# this would be ~10. Will measure.
-# GUESS
-VERTICAL_ACCEL_PER_UNIT_THRUST = 10.0
+# From physics: accel_per_unit = g / hover = 9.81 / 0.269 = 36.5
+VERTICAL_ACCEL_PER_UNIT_THRUST = 36.5
 
 
 # ─── Tilt → horizontal acceleration ───────────────────────────────────
 # Horizontal acceleration (m/s²) per radian of tilt at hover thrust.
-# At small angles, this is approximately g (9.81 m/s²) — physics, not
-# tuning. Confirmed by measurement.
+# Physics: small-angle approximation gives g at hover thrust.
 HORIZONTAL_ACCEL_PER_RAD_TILT = 9.81
 
 
 # ─── Limits ───────────────────────────────────────────────────────────
 MAX_TILT_RAD = math.radians(30)
-THRUST_MIN = 0.20
-THRUST_MAX = 0.95
+THRUST_MIN = 0.05
+THRUST_MAX = 0.85
