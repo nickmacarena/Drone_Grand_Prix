@@ -1,23 +1,20 @@
 """System identification — measure drone parameters before tuning.
 
-Standalone script. Run against the live sim *outside* a race. Sends a
-sequence of test inputs and logs the responses. At the end prints the
-measured values that should be copied into measurements.py.
+Standalone script. Run against the live sim during a race attempt (this
+consumes one race — that's fine, VQ1 has unlimited attempts).
 
-Tests (in order):
-    1. HOVER THRUST SWEEP — climbs/descends at several thrust values,
-       measures terminal vertical velocity. Hover thrust is the value
-       where vd ≈ 0.
+Strategy: a single short thrust step gives us hover thrust algebraically.
+Force balance:
+    accel_up = g × (thrust - hover) / hover
+    →  hover = g × thrust / (accel_up + g)
 
-    2. ATTITUDE STEP RESPONSE — commands target_pitch = 20° from level,
-       holds for 2 seconds. Measures rise time (time to reach 18°) and
-       overshoot.
+So one ~1-second measurement at a known thrust → hover thrust + thrust
+gain. A second brief test (pitch step) gives us attitude rise time.
 
-    3. THRUST → VERTICAL ACCEL — at HOVER + 0.10, measures vertical
-       acceleration during the first 0.5 s before drag dominates.
+Total testing time ~3 seconds. We wait for race_started=True before
+sending any non-zero commands to avoid an early-start DQ.
 
-NOTE: This does *not* start a race. Run it from the lobby (sim connected,
-heartbeat received) but before clicking RACE.
+Output goes to system_id_results.txt; terminal shows only progress.
 """
 
 import math
@@ -37,28 +34,22 @@ LOOP_PERIOD = 1.0 / LOOP_HZ
 
 OUTPUT_FILE = "system_id_results.txt"
 
+G = 9.81  # m/s², standard gravity
 
-# Detailed output goes to file; only minimal progress to terminal.
+
 _log_file = None
 
 
 def log(msg: str = ""):
-    """Write to results file; never to terminal."""
     if _log_file is not None:
         _log_file.write(msg + "\n")
         _log_file.flush()
 
 
 def status(msg: str):
-    """One-line terminal status."""
     sys.stdout.write(msg + "\n")
     sys.stdout.flush()
     log(msg)
-
-
-def sample_state(shared):
-    """Return a copy of current drone_state, or None if not yet available."""
-    return shared.drone_state
 
 
 def send_attitude(mavlink_conn, system_boot_ms, roll, pitch, yaw, thrust):
@@ -78,11 +69,10 @@ def keep_armed(mavlink_conn, shared, last_arm_t):
 
 
 def run_for(mavlink_conn, shared, system_boot_ms, duration_s, attitude, sample_log=None):
-    """Stream the given (roll, pitch, yaw, thrust) for duration_s. Sample at 20 Hz into sample_log."""
     roll, pitch, yaw, thrust = attitude
     start = time.time()
     last_arm_t = 0.0
-    sample_period = 0.05
+    sample_period = 0.02  # 50 Hz sampling
     last_sample = 0.0
 
     while time.time() - start < duration_s:
@@ -90,64 +80,81 @@ def run_for(mavlink_conn, shared, system_boot_ms, duration_s, attitude, sample_l
         send_attitude(mavlink_conn, system_boot_ms, roll, pitch, yaw, thrust)
         now = time.time()
         if sample_log is not None and now - last_sample >= sample_period:
-            ds = sample_state(shared)
+            ds = shared.drone_state
             if ds is not None:
                 sample_log.append((now - start, ds))
             last_sample = now
         time.sleep(LOOP_PERIOD)
 
 
-def test_hover_thrust(mavlink_conn, shared, system_boot_ms):
-    status("[1/3] hover thrust sweep (~12s)")
-    log("\n=== TEST 1: hover thrust sweep ===")
-    results = {}
-    for thrust in (0.40, 0.45, 0.50, 0.55, 0.60):
-        status(f"      thrust={thrust:.2f}")
-        log(f"  thrust={thrust:.2f} for 2.5s ...")
-        samples = []
-        run_for(
-            mavlink_conn, shared, system_boot_ms,
-            duration_s=2.5,
-            attitude=(0.0, 0.0, 0.0, thrust),
-            sample_log=samples,
-        )
-        if not samples:
-            log("    no samples")
-            continue
-        recent = [ds.vd_mps for t, ds in samples if t >= 1.5]
-        if not recent:
-            recent = [samples[-1][1].vd_mps]
-        mean_vd = sum(recent) / len(recent)
-        results[thrust] = mean_vd
-        log(f"    terminal vd ≈ {mean_vd:+.2f} m/s")
+def measure_hover_and_thrust_gain(mavlink_conn, shared, system_boot_ms):
+    """One short thrust step → hover thrust + thrust-to-accel gain."""
+    status("[1/2] hover thrust measurement (~1s)")
 
-    keys = sorted(results.keys())
-    hover = None
-    for a, b in zip(keys, keys[1:]):
-        if results[a] * results[b] <= 0:
-            t = results[a] / (results[a] - results[b])
-            hover = a + t * (b - a)
-            break
-    if hover is not None:
-        log(f"\n  >>> HOVER_THRUST ≈ {hover:.3f}")
-    else:
-        log("\n  >>> Could not bracket hover thrust. Widen the sweep.")
-    return hover
-
-
-def test_attitude_response(mavlink_conn, shared, system_boot_ms):
-    status("[2/3] attitude step response")
-    log("\n=== TEST 2: attitude step response (pitch 20°) ===")
-    log("  pre-step level for 1s")
-    run_for(mavlink_conn, shared, system_boot_ms, 1.0, (0.0, 0.0, 0.0, 0.5))
-
-    log("  step to pitch=20° for 2s ...")
+    test_thrust = 0.3  # likely below max-thrust DQ but well above zero
     samples = []
-    target = math.radians(20.0)
     run_for(
         mavlink_conn, shared, system_boot_ms,
-        duration_s=2.0,
-        attitude=(0.0, target, 0.0, 0.5),
+        duration_s=1.0,
+        attitude=(0.0, 0.0, 0.0, test_thrust),
+        sample_log=samples,
+    )
+
+    if len(samples) < 6:
+        log(f"  Only {len(samples)} samples — not enough")
+        return None, None
+
+    # Use early-window slope to avoid drag effects:
+    # average vd in first third vs middle third
+    n = len(samples)
+    early = samples[: n // 3]
+    mid = samples[n // 3 : 2 * n // 3]
+
+    t_e = sum(t for t, _ in early) / len(early)
+    vd_e = sum(s.vd_mps for _, s in early) / len(early)
+    t_m = sum(t for t, _ in mid) / len(mid)
+    vd_m = sum(s.vd_mps for _, s in mid) / len(mid)
+
+    dt = t_m - t_e
+    if dt <= 0:
+        log("  dt error in slope computation")
+        return None, None
+
+    accel_down = (vd_m - vd_e) / dt  # m/s² in NED (positive = downward)
+    accel_up = -accel_down
+
+    log(f"  Test thrust: {test_thrust:.3f}")
+    log(f"  Measured accel_up: {accel_up:.2f} m/s²")
+
+    # Force balance: accel_up = g * (T - T_hover) / T_hover
+    # → T_hover = g * T / (accel_up + g)
+    hover = G * test_thrust / (accel_up + G)
+
+    # Vertical accel per unit thrust above hover = g / hover
+    accel_per_unit = G / hover if hover > 0 else None
+
+    log(f"  >>> HOVER_THRUST ≈ {hover:.3f}")
+    log(f"  >>> VERTICAL_ACCEL_PER_UNIT_THRUST ≈ {accel_per_unit:.1f}")
+    return hover, accel_per_unit
+
+
+def measure_attitude_response(mavlink_conn, shared, system_boot_ms, hover_thrust):
+    """Step pitch and measure rise time."""
+    status("[2/2] attitude step response (~1.5s)")
+
+    if hover_thrust is None or hover_thrust <= 0:
+        log("  no hover thrust — using 0.3")
+        hover_thrust = 0.3
+
+    # Brief settle at hover
+    run_for(mavlink_conn, shared, system_boot_ms, 0.3, (0.0, 0.0, 0.0, hover_thrust))
+
+    samples = []
+    target_pitch = math.radians(15.0)
+    run_for(
+        mavlink_conn, shared, system_boot_ms,
+        duration_s=1.0,
+        attitude=(0.0, target_pitch, 0.0, hover_thrust),
         sample_log=samples,
     )
 
@@ -155,54 +162,20 @@ def test_attitude_response(mavlink_conn, shared, system_boot_ms):
         log("  no samples")
         return None
 
-    threshold = 0.9 * target
+    threshold = 0.9 * target_pitch
     rise_t = None
-    overshoot = 0.0
+    max_pitch = 0.0
     for t, ds in samples:
         if rise_t is None and ds.pitch_rad >= threshold:
             rise_t = t
-        overshoot = max(overshoot, ds.pitch_rad - target)
+        max_pitch = max(max_pitch, ds.pitch_rad)
 
-    log(f"\n  >>> rise time to 90% (18°): {rise_t}")
-    log(f"  >>> overshoot beyond target: {math.degrees(overshoot):.1f}°")
+    overshoot = max(0.0, max_pitch - target_pitch)
+    log(f"  Commanded pitch: 15.0°")
+    log(f"  Rise time to 90% (13.5°): {rise_t}")
+    log(f"  Overshoot: {math.degrees(overshoot):.1f}°")
+    log(f"  >>> ATTITUDE_RISE_TIME_S ≈ {rise_t}")
     return rise_t
-
-
-def test_thrust_to_accel(mavlink_conn, shared, system_boot_ms, hover_thrust):
-    status("[3/3] thrust → vertical accel")
-    log("\n=== TEST 3: thrust → vertical acceleration ===")
-    if hover_thrust is None:
-        log("  skipping — no hover thrust measured")
-        return None
-
-    test_thrust = hover_thrust + 0.10
-    log(f"  thrust={test_thrust:.3f} for 1.5s ...")
-    samples = []
-    run_for(
-        mavlink_conn, shared, system_boot_ms,
-        duration_s=1.5,
-        attitude=(0.0, 0.0, 0.0, test_thrust),
-        sample_log=samples,
-    )
-
-    if len(samples) < 4:
-        log("  not enough samples")
-        return None
-
-    early = [s for s in samples if s[0] <= 0.6]
-    if len(early) < 3:
-        early = samples[:5]
-
-    t0, ds0 = early[0]
-    t1, ds1 = early[-1]
-    dt = t1 - t0
-    accel_d = (ds1.vd_mps - ds0.vd_mps) / dt if dt > 0 else 0.0
-    accel_up = -accel_d
-
-    accel_per_unit = accel_up / 0.10
-    log(f"\n  >>> Vertical accel ≈ {accel_up:.2f} m/s² for +0.10 thrust")
-    log(f"  >>> VERTICAL_ACCEL_PER_UNIT_THRUST ≈ {accel_per_unit:.1f}")
-    return accel_per_unit
 
 
 def main():
@@ -217,38 +190,42 @@ def main():
     mavlink_conn = components["mavlink_conn"]
     shared = components["shared"]
 
-    # The sim only starts streaming position/attitude AFTER you click RACE.
-    # So system ID consumes one race attempt. That's fine — VQ1 has unlimited attempts.
-    status("CLICK RACE IN THE SIM to start system ID. Waiting up to 60s for telemetry...")
+    status("arming")
     send_arm(mavlink_conn)
-    deadline = time.time() + 60.0
+
+    # Wait for race_started — not just drone_state. Sending thrust before
+    # the race officially starts triggers an early-start DQ.
+    status("CLICK RACE in the sim. Waiting for race_started=True (up to 90s)...")
+    deadline = time.time() + 90.0
     last_arm = time.time()
     while time.time() < deadline:
-        if shared.drone_state is not None and shared.heartbeat and shared.heartbeat.armed:
+        ds = shared.drone_state
+        rs = shared.race_status
+        hb = shared.heartbeat
+        if ds is not None and rs is not None and rs.race_started and hb and hb.armed:
             break
         if time.time() - last_arm >= 0.5:
             send_arm(mavlink_conn)
             last_arm = time.time()
         time.sleep(0.05)
     else:
-        status("FAILED: no telemetry. Did you click RACE? See log.")
+        status("FAILED: race never started. See log.")
         _log_file.close()
         return
 
-    status("telemetry received — running tests now")
+    status("race started — running tests now")
 
-    hover = test_hover_thrust(mavlink_conn, shared, system_boot_ms)
-    rise_t = test_attitude_response(mavlink_conn, shared, system_boot_ms)
-    accel_per_unit = test_thrust_to_accel(mavlink_conn, shared, system_boot_ms, hover)
+    hover, accel_per_unit = measure_hover_and_thrust_gain(mavlink_conn, shared, system_boot_ms)
+    rise_t = measure_attitude_response(mavlink_conn, shared, system_boot_ms, hover)
 
     log("\n\n========== RESULTS ==========")
     log(f"HOVER_THRUST                       = {hover}")
-    log(f"ATTITUDE_RISE_TIME_S               = {rise_t}")
     log(f"VERTICAL_ACCEL_PER_UNIT_THRUST     = {accel_per_unit}")
+    log(f"ATTITUDE_RISE_TIME_S               = {rise_t}")
     log("\nCopy these into measurements.py.")
 
-    log("\nCutting thrust...")
-    run_for(mavlink_conn, shared, system_boot_ms, 2.0, (0.0, 0.0, 0.0, 0.0))
+    # Cut thrust
+    run_for(mavlink_conn, shared, system_boot_ms, 1.0, (0.0, 0.0, 0.0, 0.0))
 
     for name in ("mavlink_rx", "timesync", "heartbeat"):
         components[name].get_thread_for_join().join(timeout=1.0)
