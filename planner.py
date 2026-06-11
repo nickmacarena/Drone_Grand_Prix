@@ -19,6 +19,7 @@ per-axis PD on position toward the active gate, altitude PD+I on thrust,
 horizontal translation gated until the drone is at flying altitude.
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import Sequence, Tuple
 
@@ -49,13 +50,18 @@ class PlannerConfig:
     takeoff_climb_rate: float = 1.0     # m/s climb target during takeoff
     takeoff_vz_gain: float = 0.35       # effort per m/s of climb-rate error
 
+    # Aim this far PAST the active gate along the course direction, so the
+    # drone flies through the plane instead of parking at the center.
+    # The sim advances the gate index at the crossing.
+    pass_through_m: float = 2.5
+
 
 @dataclass
 class PlannerState:
     """Mutable controller state. One instance per flight; reset between runs."""
     i_term: float = 0.0
     last_t: float = 0.0
-    spawn_alt: float | None = None  # captured on first plan() call
+    spawn: Vec3 | None = None       # captured on first plan() call
     airborne: bool = False          # latched once takeoff completes
 
 
@@ -70,13 +76,32 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
-def select_goal(gates: Sequence[Vec3], next_gate_index: int) -> Vec3:
-    """Pick the gate to fly toward. Out-of-range index → last gate."""
+def select_goal(
+    gates: Sequence[Vec3],
+    next_gate_index: int,
+    spawn: Vec3,
+    pass_through_m: float,
+) -> Vec3:
+    """Aim point: active gate center pushed past the gate plane.
+
+    The through-direction is the unit vector from the previous gate (or the
+    spawn point, for gate 0) to the active gate. Aiming past the plane keeps
+    speed up through the crossing; the sim advances the index at the plane.
+    Out-of-range index → last gate (race finished / pre-start default).
+    """
     if not gates:
         return (0.0, 0.0, 0.0)
-    if 0 <= next_gate_index < len(gates):
-        return gates[next_gate_index]
-    return gates[-1]
+    idx = next_gate_index if 0 <= next_gate_index < len(gates) else len(gates) - 1
+    gate = gates[idx]
+    prev = gates[idx - 1] if idx >= 1 else spawn
+    dx = gate[0] - prev[0]
+    dy = gate[1] - prev[1]
+    dz = gate[2] - prev[2]
+    norm = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if norm < 1e-6:
+        return gate
+    s = pass_through_m / norm
+    return (gate[0] + dx * s, gate[1] + dy * s, gate[2] + dz * s)
 
 
 def plan(
@@ -90,22 +115,22 @@ def plan(
     integrate_alt: bool = True,
 ) -> PlannerOutput:
     """One planning step. Returns normalized efforts (see module docstring)."""
-    goal = select_goal(gates, next_gate_index)
-
     x, y, alt = pos
     vx, vy, v_alt = vel
     dt = max(1e-3, t - state.last_t)
     state.last_t = t
 
-    if state.spawn_alt is None:
-        state.spawn_alt = alt
+    if state.spawn is None:
+        state.spawn = (x, y, alt)
+
+    goal = select_goal(gates, next_gate_index, state.spawn, cfg.pass_through_m)
 
     # Takeoff completes (and latches) once we've climbed clear of the spawn
     # or risen to within a band of the goal altitude. The latch matters on
     # descending courses: later legs drop below spawn altitude, and takeoff
     # must not re-engage there.
     if not state.airborne:
-        cleared_spawn = alt > state.spawn_alt + cfg.takeoff_clear_m
+        cleared_spawn = alt > state.spawn[2] + cfg.takeoff_clear_m
         near_goal = abs(goal[2] - alt) < cfg.takeoff_goal_band_m and v_alt > 0.0
         if cleared_spawn or near_goal:
             state.airborne = True

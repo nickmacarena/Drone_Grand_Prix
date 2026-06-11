@@ -29,7 +29,7 @@ source "$HOME/.cargo/env"
 # Strip anaconda: its broken pyodbc dist-info crashes elodin's env scanner.
 export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v anaconda | paste -sd: -)
 
-cleanup; sleep 1
+cleanup; sleep 3  # let UDP ports release or Betaflight fails to bind and every tick eats a 100ms bridge timeout
 
 COURSE="$COURSE_NAME" PYTHONPATH="$DGP_DIR" RACE_SOLVER="$SOLVER" \
     elodin run sim/main.py > "$LOG" 2>&1 &
