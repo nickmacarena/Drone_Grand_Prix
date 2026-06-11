@@ -36,9 +36,15 @@ G = 9.81
 
 # Calibration phase
 CAL_THRUST = 0.35      # safely above any plausible hover; drone climbs gently
-CAL_DURATION_S = 1.2
+CAL_DURATION_S = 0.9
 CAL_SKIP_S = 0.3       # ignore the first samples (arming/thrust spool)
 HOVER_MIN, HOVER_MAX = 0.05, 0.8   # sanity clamp on the fitted value
+
+# Post-calibration settle: hold level at fitted hover until the climb from
+# the calibration burn bleeds off. Handing a fast-climbing drone straight to
+# the planner caused a rollercoaster it never recovered from (run 2).
+SETTLE_VD_MPS = 0.8
+SETTLE_MAX_S = 3.0
 
 # Flight mapping
 MAX_TILT_RAD = math.radians(20)
@@ -69,6 +75,8 @@ class Controller:
         self.hover_thrust = None        # set by calibration
         self._cal_t0 = None
         self._cal_samples = []          # (t, vd)
+        self._settle_t0 = None
+        self._settled = False
         self._last_arm_t = 0.0
         self._last_log_t = 0.0
         self._logged_gates = False
@@ -110,6 +118,17 @@ class Controller:
         # CALIBRATE: fixed thrust, level, fit hover from vertical accel.
         if self.hover_thrust is None:
             return self._calibrate_step(ds)
+
+        # SETTLE: bleed off the calibration climb before handing to the planner.
+        if not self._settled:
+            now = time.time()
+            if self._settle_t0 is None:
+                self._settle_t0 = now
+            if abs(ds.vd_mps) < SETTLE_VD_MPS or now - self._settle_t0 > SETTLE_MAX_S:
+                self._settled = True
+                print(f"  [CAL] settled (vd={ds.vd_mps:+.2f}); flying", flush=True)
+            else:
+                return 0.0, 0.0, ds.yaw_rad, self.hover_thrust
 
         # FLY
         return self._fly_step(ds, td, rs)
@@ -198,7 +217,8 @@ class Controller:
             self._logged_gates = True
 
         ds_str = (
-            f"pos=({ds.north_m:.1f},{ds.east_m:.1f},{ds.down_m:.1f})"
+            f"pos=({ds.north_m:.1f},{ds.east_m:.1f},{ds.down_m:.1f}) "
+            f"vd={ds.vd_mps:+.1f} att=({math.degrees(ds.roll_rad):+.0f},{math.degrees(ds.pitch_rad):+.0f})"
             if ds else "pos=None"
         )
         rs_str = (
