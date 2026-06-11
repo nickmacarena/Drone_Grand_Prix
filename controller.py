@@ -40,11 +40,18 @@ CAL_DURATION_S = 0.9
 CAL_SKIP_S = 0.3       # ignore the first samples (arming/thrust spool)
 HOVER_MIN, HOVER_MAX = 0.05, 0.8   # sanity clamp on the fitted value
 
-# Post-calibration settle: hold level at fitted hover until the climb from
-# the calibration burn bleeds off. Handing a fast-climbing drone straight to
-# the planner caused a rollercoaster it never recovered from (run 2).
+# Post-calibration settle: trim hover against vertical speed (integrator —
+# the slope fit lands above true hover because drag confounds it; run 3
+# "settled" at -7.5 m/s on timeout and handed the planner a climbing drone).
 SETTLE_VD_MPS = 0.8
-SETTLE_MAX_S = 3.0
+SETTLE_MAX_S = 8.0
+SETTLE_TRIM_GAIN = 0.012   # hover -= gain * (-vd) * dt
+SETTLE_DAMP = 0.4          # vertical effort = clamp(damp * vd, ...)
+
+# Command shaping: a ballistic, tumbling drone came from near-zero thrust +
+# rapidly alternating ±20° targets (run 3 flew inverted, att roll ~180°).
+EFFORT_FLOOR = -0.6        # vertical effort floor → thrust ≥ ~0.5 * hover
+ATT_SLEW_RAD_S = math.radians(90)   # max attitude-target change rate
 
 # Flight mapping
 MAX_TILT_RAD = math.radians(20)
@@ -76,7 +83,11 @@ class Controller:
         self._cal_t0 = None
         self._cal_samples = []          # (t, vd)
         self._settle_t0 = None
+        self._settle_last_t = None
         self._settled = False
+        self._last_roll_cmd = 0.0
+        self._last_pitch_cmd = 0.0
+        self._last_cmd_t = None
         self._last_arm_t = 0.0
         self._last_log_t = 0.0
         self._logged_gates = False
@@ -119,16 +130,28 @@ class Controller:
         if self.hover_thrust is None:
             return self._calibrate_step(ds)
 
-        # SETTLE: bleed off the calibration climb before handing to the planner.
+        # SETTLE: trim the hover estimate against vertical speed and bleed
+        # off the calibration climb before handing to the planner.
         if not self._settled:
             now = time.time()
             if self._settle_t0 is None:
                 self._settle_t0 = now
+                self._settle_last_t = now
+            dt = max(1e-3, now - self._settle_last_t)
+            self._settle_last_t = now
+
+            # Climbing (vd < 0) → fitted hover is high → trim it down.
+            # Rate at vd = -7: about -0.08/s on the hover estimate.
+            self.hover_thrust += SETTLE_TRIM_GAIN * ds.vd_mps * dt
+            self.hover_thrust = max(HOVER_MIN, min(HOVER_MAX, self.hover_thrust))
+
             if abs(ds.vd_mps) < SETTLE_VD_MPS or now - self._settle_t0 > SETTLE_MAX_S:
                 self._settled = True
-                print(f"  [CAL] settled (vd={ds.vd_mps:+.2f}); flying", flush=True)
+                print(f"  [CAL] settled: vd={ds.vd_mps:+.2f}, trimmed hover={self.hover_thrust:.3f}", flush=True)
             else:
-                return 0.0, 0.0, ds.yaw_rad, self.hover_thrust
+                effort = max(EFFORT_FLOOR, min(1.0, SETTLE_DAMP * ds.vd_mps))
+                thr = self.hover_thrust * (1.0 + VERT_AUTH_FRAC * effort)
+                return 0.0, 0.0, ds.yaw_rad, max(THRUST_MIN, min(THRUST_MAX, thr))
 
         # FLY
         return self._fly_step(ds, td, rs)
@@ -193,7 +216,19 @@ class Controller:
         pitch = -MAX_TILT_RAD * tilt_fwd
         roll = MAX_TILT_RAD * tilt_right
 
-        thrust = self.hover_thrust * (1.0 + VERT_AUTH_FRAC * out.vertical)
+        # Slew-limit attitude targets: rapidly alternating large targets
+        # tumbled the sim's stabilizer (run 3).
+        now = time.time()
+        dt = max(1e-3, now - self._last_cmd_t) if self._last_cmd_t else 1.0 / CONTROL_HZ
+        self._last_cmd_t = now
+        max_step = ATT_SLEW_RAD_S * dt
+        roll = self._last_roll_cmd + max(-max_step, min(max_step, roll - self._last_roll_cmd))
+        pitch = self._last_pitch_cmd + max(-max_step, min(max_step, pitch - self._last_pitch_cmd))
+        self._last_roll_cmd = roll
+        self._last_pitch_cmd = pitch
+
+        vertical = max(EFFORT_FLOOR, min(1.0, out.vertical))
+        thrust = self.hover_thrust * (1.0 + VERT_AUTH_FRAC * vertical)
         thrust = max(THRUST_MIN, min(THRUST_MAX, thrust))
 
         return roll, pitch, yaw, thrust
