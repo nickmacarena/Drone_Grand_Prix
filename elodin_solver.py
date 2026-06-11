@@ -35,7 +35,10 @@ THRUST_MAX_CMD = 0.95
 _cfg = PlannerConfig(
     kp_x=0.31, kd_x=0.52,
     kp_y=0.31, kd_y=0.52,
-    kp_alt=0.17, kd_alt=0.23, ki_alt=0.02, i_clamp=0.30,
+    # Vertical: stiffer damping so steep descents brake before the gate
+    # altitude, and a near-disabled integrator — hover feedforward is exact,
+    # and i-windup during long descents dragged recovery out ~30s.
+    kp_alt=0.22, kd_alt=0.42, ki_alt=0.005, i_clamp=0.06,
     takeoff_clear_m=1.0,
     takeoff_goal_band_m=1.0,
     takeoff_climb_rate=1.0,

@@ -94,14 +94,16 @@ def select_goal(
     idx = next_gate_index if 0 <= next_gate_index < len(gates) else len(gates) - 1
     gate = gates[idx]
     prev = gates[idx - 1] if idx >= 1 else spawn
+    # Horizontal-only offset: altitude target stays at the gate center, so a
+    # climbing/descending course still crosses the plane inside the inner
+    # square (a sloped offset shifted the crossing altitude out of the box).
     dx = gate[0] - prev[0]
     dy = gate[1] - prev[1]
-    dz = gate[2] - prev[2]
-    norm = math.sqrt(dx * dx + dy * dy + dz * dz)
+    norm = math.sqrt(dx * dx + dy * dy)
     if norm < 1e-6:
         return gate
     s = pass_through_m / norm
-    return (gate[0] + dx * s, gate[1] + dy * s, gate[2] + dz * s)
+    return (gate[0] + dx * s, gate[1] + dy * s, gate[2])
 
 
 def plan(
