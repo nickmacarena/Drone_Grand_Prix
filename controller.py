@@ -68,6 +68,15 @@ SIGN_PULSE_RATE = 0.6      # rad/s
 SIGN_PULSE_S = 0.35
 SIGN_MIN_DELTA_RAD = 0.02  # below this, keep default sign
 
+# Tilt-mapping auto-detection: run 6 flew 230 m NORTH (away from every gate)
+# with a perfectly tracking attitude loop — the sim's ATTITUDE telemetry
+# reports pitch with the opposite sign (nose-down positive), so "tracked"
+# attitude is physically mirrored. Hold a small tilt, measure which way
+# velocity builds in the body frame, set the mapping sign from data.
+TILT_TEST_RAD = math.radians(12)
+TILT_TEST_S = 0.8
+TILT_MIN_DV_MPS = 0.15
+
 # Flight mapping
 MAX_TILT_RAD = math.radians(20)
 VERT_AUTH_FRAC = 0.8   # thrust = hover * (1 + frac * vertical_effort)
@@ -110,6 +119,13 @@ class Controller:
         self._sign_att0 = None
         self._signs_done = False
         self._direct_rates = None               # when set, update() sends these raw
+        # Tilt-mapping detection state
+        self.pitch_map = 1.0                    # multiplies the pitch target
+        self.roll_map = 1.0
+        self._map_phase = "pitch"               # "pitch" → "roll" → done
+        self._map_t0 = None
+        self._map_v0 = None
+        self._maps_done = False
         self._last_arm_t = 0.0
         self._last_log_t = 0.0
         self._logged_gates = False
@@ -211,6 +227,10 @@ class Controller:
         if not self._signs_done:
             return self._sign_step(ds)
 
+        # TILT-MAP DETECTION: hold small tilts, watch which way velocity builds.
+        if not self._maps_done:
+            return self._map_step(ds)
+
         # FLY
         return self._fly_step(ds, td, rs)
 
@@ -282,6 +302,43 @@ class Controller:
         # Hover thrust during the test; attitude args unused while pulsing.
         return 0.0, 0.0, ds.yaw_rad, self.hover_thrust
 
+    def _map_step(self, ds):
+        """Hold a small tilt; the sign of the body-frame velocity response
+        gives the physical meaning of our (possibly mirrored) attitude axes."""
+        now = time.time()
+        yaw = ds.yaw_rad
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        v_fwd = cy * ds.vn_mps + sy * ds.ve_mps
+        v_right = -sy * ds.vn_mps + cy * ds.ve_mps
+
+        if self._map_t0 is None:
+            self._map_t0 = now
+            self._map_v0 = (v_fwd, v_right)
+            print(f"  [MAP] testing {self._map_phase} tilt", flush=True)
+
+        if now - self._map_t0 >= TILT_TEST_S:
+            dv_fwd = v_fwd - self._map_v0[0]
+            dv_right = v_right - self._map_v0[1]
+            if self._map_phase == "pitch":
+                # Commanded nose-down (-TILT_TEST) should build FORWARD speed.
+                if abs(dv_fwd) >= TILT_MIN_DV_MPS:
+                    self.pitch_map = 1.0 if dv_fwd > 0 else -1.0
+                print(f"  [MAP] pitch: dv_fwd={dv_fwd:+.2f} -> map {self.pitch_map:+.0f}", flush=True)
+                self._map_phase = "roll"
+                self._map_t0 = None
+            else:
+                # Commanded roll-right (+TILT_TEST) should build RIGHT speed.
+                if abs(dv_right) >= TILT_MIN_DV_MPS:
+                    self.roll_map = 1.0 if dv_right > 0 else -1.0
+                print(f"  [MAP] roll: dv_right={dv_right:+.2f} -> map {self.roll_map:+.0f}", flush=True)
+                self._maps_done = True
+                print(f"  [MAP] done: pitch_map={self.pitch_map:+.0f} roll_map={self.roll_map:+.0f}", flush=True)
+            return 0.0, 0.0, yaw, self.hover_thrust
+
+        if self._map_phase == "pitch":
+            return 0.0, -TILT_TEST_RAD, yaw, self.hover_thrust
+        return TILT_TEST_RAD, 0.0, yaw, self.hover_thrust
+
     def _fly_step(self, ds, td, rs):
         # NED → planner frame (x=north, y=east, alt up)
         pos = (ds.north_m, ds.east_m, -ds.down_m)
@@ -305,8 +362,8 @@ class Controller:
         cy, sy = math.cos(yaw), math.sin(yaw)
         tilt_fwd = cy * out.tilt_x + sy * out.tilt_y
         tilt_right = -sy * out.tilt_x + cy * out.tilt_y
-        pitch = -MAX_TILT_RAD * tilt_fwd
-        roll = MAX_TILT_RAD * tilt_right
+        pitch = self.pitch_map * (-MAX_TILT_RAD * tilt_fwd)
+        roll = self.roll_map * (MAX_TILT_RAD * tilt_right)
 
         # Slew-limit attitude targets: rapidly alternating large targets
         # tumbled the sim's stabilizer (run 3).
