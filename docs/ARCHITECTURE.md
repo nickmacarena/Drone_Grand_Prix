@@ -179,6 +179,30 @@ All background threads expose `get_thread_for_join()` for clean shutdown.
 
 ---
 
+## Two-Sim Development Loop (since 2026-06-08)
+
+Hand-tuning against the official sim was a 5-minute-per-iteration loop with
+DQ/timing noise. We now develop against the **Elodin practice harness**
+(`~/code/AIGP/elodin`, github.com/elodin-sys/ai-grand-prix): real Betaflight
+SITL + deterministic physics, runs headless on the Mac in seconds.
+
+```
+                      planner.py  (sim-agnostic, lives in THIS repo)
+                      (x, y, alt) world frame, normalized effort outputs
+                       /                          \
+        elodin_solver.py                    controller.py + mavlink_tx.py
+        (Elodin adapter)                    (AIGP adapter)
+        efforts → RC PWM                    efforts → quaternion + thrust
+        gates ← sim/course.py               gates ← ENCAPSULATED_DATA track data
+```
+
+- **Development** (logic, gate sequencing, braking, lookahead): hundreds of
+  fast iterations in Elodin.
+- **Calibration** (hover thrust, tilt→accel, drag): a handful of runs in the
+  official sim; constants live in the adapter, not the planner.
+- Run our solver in Elodin from the elodin repo root:
+  `PYTHONPATH=~/code/AIGP/Drone_Grand_Prix RACE_SOLVER=elodin_solver elodin run sim/main.py`
+
 ## Development Phasing
 
 ### Phase 1 — Foundations
@@ -186,9 +210,10 @@ All background threads expose `get_thread_for_join()` for clean shutdown.
 - ✅ Confirm only attitude+thrust is followed by sim
 - ✅ Re-arming + race-start handling
 
-### Phase 2 — System ID + cascaded controller (current)
-- Run `system_id.py` to measure hover thrust + attitude response
-- Implement `pid.py` with three nested loops
+### Phase 2 — Planner in Elodin, then port (current)
+- ✅ Elodin harness installed, baseline passes 3/3 gates
+- Sim-agnostic `planner.py` + `elodin_solver.py` adapter
+- Verify 3/3 in Elodin, then port to AIGP adapter + calibrate
 - Get through VQ1 reliably
 
 ### Phase 3 — VQ2 perception
