@@ -89,6 +89,40 @@ Also added handlers for HEARTBEAT, COMMAND_ACK, STATUSTEXT for visibility into t
 
 ---
 
+## 2026-06-11 — Elodin Harness Forensics: the Betaflight Bridge Is Broken
+
+Replicated VQ1 in Elodin (sim/course.py VQ1_COURSE from logged track data) and
+spent the day chasing why nothing could descend. Calibration probe
+(elodin_probe.py) + raw db telemetry traced it to the harness itself:
+
+- **Gyro axis signs in sensors.py are wrong.** The shipped code sends
+  (wx, -wy, +wz); Betaflight SITL (gazebo build) needs (wx, -wy, -wz).
+  The inverted yaw loop saturates the motors in a permanent max-differential
+  fight (one motor at 1.0, one at idle floor), and **airmode lifts collective
+  to ~0.53 regardless of throttle stick** — Betaflight has never tracked our
+  throttle in any run. The baseline's "altitude control" is an illusion.
+- ANGLE mode is also unusable: the attitude estimator gets frame-inconsistent
+  gyro/accel and levels to a wandering 30-50° tilt. (Engaged via aux2≥1700;
+  the shipped baseline never engages it, so the authors never saw either bug.)
+- DEFAULT_CONFIG is a smoke-test plant: linear_drag z=40 N/(m/s) caps
+  vertical speed at ~0.6 m/s. Patched locally to create_5inch_racing_quad().
+  The baseline's hover constant (1135) matches the racing preset, not the
+  shipped default — more evidence the default is unintentional.
+- With corrected signs + racing preset, all three rate loops survive but
+  limit-cycle at ±2.5 rad/s with motor saturation (BF default PIDs vs tiny
+  inertia + lockstep latency) — airmode still owns the throttle.
+- Clean measurements obtained: stick→rate ≈ 0.30 (deg/s)/PWM from level;
+  probe runner tools/run_elodin.sh (elodin run never exits on its own —
+  every "batch" run before this only executed its first command).
+- Upstream has no fixes and no issues filed. Worth reporting once confirmed.
+
+Local patches to the elodin clone: sensors.py (gyro signs), config.py
+(racing preset), course.py (VQ1 replica + course selector), main.py
+(course env wiring). Decision pending: keep fixing BF's tuning vs bypass
+Betaflight with our own attitude controller on the clean physics core.
+
+---
+
 ## 2026-06-10 — Sim-Agnostic Planner Working in Elodin
 
 - Strategy shift: develop against the Elodin practice harness (Betaflight SITL,

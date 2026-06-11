@@ -12,6 +12,7 @@ set -u
 COURSE_NAME="${1:-easy}"
 LOG="${2:-/tmp/elodin_${COURSE_NAME}.log}"
 TIMEOUT_S="${3:-180}"
+SOLVER="${4:-elodin_solver}"
 
 ELODIN_DIR="$HOME/code/AIGP/elodin"
 DGP_DIR="$HOME/code/AIGP/Drone_Grand_Prix"
@@ -30,7 +31,7 @@ export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v anaconda | paste -sd: -)
 
 cleanup; sleep 1
 
-COURSE="$COURSE_NAME" PYTHONPATH="$DGP_DIR" RACE_SOLVER=elodin_solver \
+COURSE="$COURSE_NAME" PYTHONPATH="$DGP_DIR" RACE_SOLVER="$SOLVER" \
     elodin run sim/main.py > "$LOG" 2>&1 &
 
 for _ in $(seq "$TIMEOUT_S"); do
@@ -40,7 +41,7 @@ for _ in $(seq "$TIMEOUT_S"); do
     sleep 1
 done
 
-echo "=== $COURSE_NAME ==="
-grep -E "\[RACE\]|Traceback|Error" "$LOG" | head -3
+echo "=== $COURSE_NAME ($SOLVER) ==="
+grep -E "\[RACE\]|\[PROBE\]|Traceback|Error" "$LOG" | head -25
 cleanup
 exit 0

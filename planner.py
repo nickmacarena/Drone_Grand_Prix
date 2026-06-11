@@ -40,10 +40,14 @@ class PlannerConfig:
     ki_alt: float = 0.0172
     i_clamp: float = 0.172
 
-    # Takeoff: below this altitude, climb at fixed effort and don't translate
-    min_translation_alt_m: float = 1.0
-    takeoff_effort: float = 0.355
-    takeoff_climb_rate_max: float = 0.7  # m/s; above this, hand over to PD
+    # Takeoff: climb (no translation) until clear of the spawn point or near
+    # goal altitude. Spawn-relative, so it works whether the course sits
+    # above the spawn (Elodin easy), descends below it (VQ1), or starts at
+    # spawn height (official sim platform).
+    takeoff_clear_m: float = 1.0        # alt above spawn that ends takeoff
+    takeoff_goal_band_m: float = 1.0    # ...or climbing to within this of goal alt
+    takeoff_climb_rate: float = 1.0     # m/s climb target during takeoff
+    takeoff_vz_gain: float = 0.35       # effort per m/s of climb-rate error
 
 
 @dataclass
@@ -51,6 +55,8 @@ class PlannerState:
     """Mutable controller state. One instance per flight; reset between runs."""
     i_term: float = 0.0
     last_t: float = 0.0
+    spawn_alt: float | None = None  # captured on first plan() call
+    airborne: bool = False          # latched once takeoff completes
 
 
 @dataclass(frozen=True)
@@ -91,6 +97,19 @@ def plan(
     dt = max(1e-3, t - state.last_t)
     state.last_t = t
 
+    if state.spawn_alt is None:
+        state.spawn_alt = alt
+
+    # Takeoff completes (and latches) once we've climbed clear of the spawn
+    # or risen to within a band of the goal altitude. The latch matters on
+    # descending courses: later legs drop below spawn altitude, and takeoff
+    # must not re-engage there.
+    if not state.airborne:
+        cleared_spawn = alt > state.spawn_alt + cfg.takeoff_clear_m
+        near_goal = abs(goal[2] - alt) < cfg.takeoff_goal_band_m and v_alt > 0.0
+        if cleared_spawn or near_goal:
+            state.airborne = True
+
     # ── Vertical ─────────────────────────────────────────────────────
     alt_err = goal[2] - alt
     if integrate_alt:
@@ -100,16 +119,18 @@ def plan(
             cfg.i_clamp,
         )
 
-    if alt < cfg.min_translation_alt_m and v_alt < cfg.takeoff_climb_rate_max:
-        vertical = cfg.takeoff_effort
+    if not state.airborne:
+        # Climb-rate controller: ~0.35 effort on a pad (matches the proven
+        # baseline takeoff), saturates to recover from an initial descent.
+        vertical = cfg.takeoff_vz_gain * (cfg.takeoff_climb_rate - v_alt)
     else:
         vertical = cfg.kp_alt * alt_err - cfg.kd_alt * v_alt + state.i_term
     vertical = _clamp(vertical, -1.0, 1.0)
 
-    # ── Horizontal (gated until at flying altitude) ──────────────────
+    # ── Horizontal (gated until airborne) ────────────────────────────
     tilt_x = 0.0
     tilt_y = 0.0
-    if alt >= cfg.min_translation_alt_m:
+    if state.airborne:
         tilt_x = _clamp(cfg.kp_x * (goal[0] - x) - cfg.kd_x * vx, -1.0, 1.0)
         tilt_y = _clamp(cfg.kp_y * (goal[1] - y) - cfg.kd_y * vy, -1.0, 1.0)
 
