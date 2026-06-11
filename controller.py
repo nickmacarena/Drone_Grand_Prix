@@ -42,16 +42,16 @@ HOVER_MIN, HOVER_MAX = 0.05, 0.8   # sanity clamp on the fitted value
 
 # Flight mapping
 MAX_TILT_RAD = math.radians(20)
-VERT_AUTH_FRAC = 0.4   # thrust = hover * (1 + frac * vertical_effort)
+VERT_AUTH_FRAC = 0.8   # thrust = hover * (1 + frac * vertical_effort)
 THRUST_MIN, THRUST_MAX = 0.02, 0.9
 
 # Planner gains for this authority:
 #   horizontal accel ≈ g·tan(20°) ≈ 3.6 m/s² at |tilt|=1  → ωn≈1.0, ζ≈1
-#   vertical accel  ≈ g·VERT_AUTH ≈ 3.9 m/s² at |vert|=1  → ωn≈1.2, ζ≈1
+#   vertical accel  ≈ g·VERT_AUTH ≈ 7.8 m/s² at |vert|=1  → ωn≈1.2, ζ≈1
 PLANNER_CFG = PlannerConfig(
     kp_x=0.28, kd_x=0.56,
     kp_y=0.28, kd_y=0.56,
-    kp_alt=0.37, kd_alt=0.62, ki_alt=0.005, i_clamp=0.06,
+    kp_alt=0.18, kd_alt=0.31, ki_alt=0.005, i_clamp=0.06,
     takeoff_clear_m=1.0,
     takeoff_goal_band_m=1.0,
     takeoff_climb_rate=1.0,
@@ -103,9 +103,9 @@ class Controller:
         td = self.shared.track_data
         rs = self.shared.race_status
 
-        # PRE-RACE: hold level, zero thrust. No motion before the gun.
+        # PRE-RACE: hold level at current yaw, zero thrust. No motion before the gun.
         if ds is None or td is None or rs is None or not rs.race_started:
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, (ds.yaw_rad if ds else 0.0), 0.0
 
         # CALIBRATE: fixed thrust, level, fit hover from vertical accel.
         if self.hover_thrust is None:
@@ -128,7 +128,9 @@ class Controller:
             self.hover_thrust = self._fit_hover()
             print(f"  [CAL] hover_thrust = {self.hover_thrust:.3f}", flush=True)
 
-        return 0.0, 0.0, 0.0, CAL_THRUST
+        # Hold CURRENT yaw — drone spawns facing ~south; commanding yaw 0
+        # made the stabilizer whip through a 180° flip at the gun (run 1).
+        return 0.0, 0.0, ds.yaw_rad, CAL_THRUST
 
     def _fit_hover(self):
         n = len(self._cal_samples)
@@ -161,16 +163,21 @@ class Controller:
             time.time(), pos, vel, gates, idx,
         )
 
-        # Efforts → attitude. Yaw held 0 (facing north, NED).
-        # tilt_x (+north): nose down = pitch negative (NED pitch up positive).
-        # tilt_y (+east): roll right positive.
-        pitch = -MAX_TILT_RAD * out.tilt_x
-        roll = MAX_TILT_RAD * out.tilt_y
+        # Efforts → attitude, holding CURRENT yaw (never command yaw motion).
+        # Rotate the world-frame tilt (toward +north, +east) into the body
+        # frame: forward tilt = nose down = negative FRD pitch; right tilt =
+        # positive roll.
+        yaw = ds.yaw_rad
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        tilt_fwd = cy * out.tilt_x + sy * out.tilt_y
+        tilt_right = -sy * out.tilt_x + cy * out.tilt_y
+        pitch = -MAX_TILT_RAD * tilt_fwd
+        roll = MAX_TILT_RAD * tilt_right
 
         thrust = self.hover_thrust * (1.0 + VERT_AUTH_FRAC * out.vertical)
         thrust = max(THRUST_MIN, min(THRUST_MAX, thrust))
 
-        return roll, pitch, 0.0, thrust
+        return roll, pitch, yaw, thrust
 
     # ── telemetry ─────────────────────────────────────────────────────
     def _maybe_log(self, roll, pitch, thrust):
