@@ -68,14 +68,16 @@ SIGN_PULSE_RATE = 0.6      # rad/s
 SIGN_PULSE_S = 0.35
 SIGN_MIN_DELTA_RAD = 0.02  # below this, keep default sign
 
-# Tilt-mapping auto-detection: run 6 flew 230 m NORTH (away from every gate)
-# with a perfectly tracking attitude loop — the sim's ATTITUDE telemetry
-# reports pitch with the opposite sign (nose-down positive), so "tracked"
-# attitude is physically mirrored. Hold a small tilt, measure which way
-# velocity builds in the body frame, set the mapping sign from data.
+# Tilt-response matrix: the sim's attitude telemetry is mirrored on some
+# axes, offset on others (level pad reads pitch +18°), and yaw drifts after
+# the sign pulses — per-axis sign flips can't untangle that (runs 6-7 each
+# fixed one axis and revealed another). Instead, measure the full 2x2 map
+# from attitude deflection (around the resting attitude) to world-frame
+# acceleration, and invert it. Mirrors, rotations, and offsets all reduce
+# to numbers in the matrix.
 TILT_TEST_RAD = math.radians(12)
 TILT_TEST_S = 0.8
-TILT_MIN_DV_MPS = 0.15
+M_DET_MIN = 0.5            # (m/s²/rad)² — below this the matrix is garbage
 
 # Flight mapping
 MAX_TILT_RAD = math.radians(20)
@@ -119,12 +121,14 @@ class Controller:
         self._sign_att0 = None
         self._signs_done = False
         self._direct_rates = None               # when set, update() sends these raw
-        # Tilt-mapping detection state
-        self.pitch_map = 1.0                    # multiplies the pitch target
-        self.roll_map = 1.0
+        # Tilt-response matrix state
+        self.resp = None                        # 2x2: d(accel_n, accel_e)/d(pitch, roll)
+        self.resp_inv = None
+        self.yaw_ref = None                     # yaw pinned for the whole flight
         self._map_phase = "pitch"               # "pitch" → "roll" → done
         self._map_t0 = None
         self._map_v0 = None
+        self._map_cols = {}
         self._maps_done = False
         self._last_arm_t = 0.0
         self._last_log_t = 0.0
@@ -303,41 +307,56 @@ class Controller:
         return 0.0, 0.0, ds.yaw_rad, self.hover_thrust
 
     def _map_step(self, ds):
-        """Hold a small tilt; the sign of the body-frame velocity response
-        gives the physical meaning of our (possibly mirrored) attitude axes."""
+        """Measure the world-accel response to each attitude axis.
+
+        Deflections are around the resting attitude (which is physically
+        level even though it reads pitch +18). Yaw is pinned to yaw_ref
+        during and after the tests so the measured matrix stays valid.
+        """
         now = time.time()
-        yaw = ds.yaw_rad
-        cy, sy = math.cos(yaw), math.sin(yaw)
-        v_fwd = cy * ds.vn_mps + sy * ds.ve_mps
-        v_right = -sy * ds.vn_mps + cy * ds.ve_mps
+        if self.yaw_ref is None:
+            self.yaw_ref = ds.yaw_rad
+            print(f"  [MAP] yaw pinned at {math.degrees(self.yaw_ref):+.0f} deg", flush=True)
+
+        r0, p0 = self._cal_att0
 
         if self._map_t0 is None:
             self._map_t0 = now
-            self._map_v0 = (v_fwd, v_right)
-            print(f"  [MAP] testing {self._map_phase} tilt", flush=True)
+            self._map_v0 = (ds.vn_mps, ds.ve_mps)
+            print(f"  [MAP] testing {self._map_phase} deflection", flush=True)
 
         if now - self._map_t0 >= TILT_TEST_S:
-            dv_fwd = v_fwd - self._map_v0[0]
-            dv_right = v_right - self._map_v0[1]
+            dt = now - self._map_t0
+            col = (
+                (ds.vn_mps - self._map_v0[0]) / dt / TILT_TEST_RAD,
+                (ds.ve_mps - self._map_v0[1]) / dt / TILT_TEST_RAD,
+            )
+            self._map_cols[self._map_phase] = col
+            print(f"  [MAP] {self._map_phase}: accel response "
+                  f"(n={col[0]:+.2f}, e={col[1]:+.2f}) m/s^2 per rad", flush=True)
             if self._map_phase == "pitch":
-                # Commanded nose-down (-TILT_TEST) should build FORWARD speed.
-                if abs(dv_fwd) >= TILT_MIN_DV_MPS:
-                    self.pitch_map = 1.0 if dv_fwd > 0 else -1.0
-                print(f"  [MAP] pitch: dv_fwd={dv_fwd:+.2f} -> map {self.pitch_map:+.0f}", flush=True)
                 self._map_phase = "roll"
                 self._map_t0 = None
             else:
-                # Commanded roll-right (+TILT_TEST) should build RIGHT speed.
-                if abs(dv_right) >= TILT_MIN_DV_MPS:
-                    self.roll_map = 1.0 if dv_right > 0 else -1.0
-                print(f"  [MAP] roll: dv_right={dv_right:+.2f} -> map {self.roll_map:+.0f}", flush=True)
-                self._maps_done = True
-                print(f"  [MAP] done: pitch_map={self.pitch_map:+.0f} roll_map={self.roll_map:+.0f}", flush=True)
-            return 0.0, 0.0, yaw, self.hover_thrust
+                self._finish_matrix()
+            return r0, p0, self.yaw_ref, self.hover_thrust
 
         if self._map_phase == "pitch":
-            return 0.0, -TILT_TEST_RAD, yaw, self.hover_thrust
-        return TILT_TEST_RAD, 0.0, yaw, self.hover_thrust
+            return r0, p0 + TILT_TEST_RAD, self.yaw_ref, self.hover_thrust
+        return r0 + TILT_TEST_RAD, p0, self.yaw_ref, self.hover_thrust
+
+    def _finish_matrix(self):
+        a, c = self._map_cols["pitch"]   # accel_n, accel_e per rad of pitch
+        b, d = self._map_cols["roll"]    # accel_n, accel_e per rad of roll
+        det = a * d - b * c
+        self._maps_done = True
+        if abs(det) < M_DET_MIN:
+            # Degenerate measurement; fall back to identity-ish guess.
+            print(f"  [MAP] WARNING det={det:.2f} too small; using fallback", flush=True)
+            self.resp_inv = ((1.0 / 5.0, 0.0), (0.0, 1.0 / 5.0))
+        else:
+            self.resp_inv = ((d / det, -b / det), (-c / det, a / det))
+        print(f"  [MAP] matrix done: det={det:+.2f}", flush=True)
 
     def _fly_step(self, ds, td, rs):
         # NED → planner frame (x=north, y=east, alt up)
@@ -354,16 +373,21 @@ class Controller:
             time.time(), pos, vel, gates, idx,
         )
 
-        # Efforts → attitude, holding CURRENT yaw (never command yaw motion).
-        # Rotate the world-frame tilt (toward +north, +east) into the body
-        # frame: forward tilt = nose down = negative FRD pitch; right tilt =
-        # positive roll.
-        yaw = ds.yaw_rad
-        cy, sy = math.cos(yaw), math.sin(yaw)
-        tilt_fwd = cy * out.tilt_x + sy * out.tilt_y
-        tilt_right = -sy * out.tilt_x + cy * out.tilt_y
-        pitch = self.pitch_map * (-MAX_TILT_RAD * tilt_fwd)
-        roll = self.roll_map * (MAX_TILT_RAD * tilt_right)
+        # Efforts → attitude via the measured response matrix. Desired
+        # world-frame acceleration → (pitch, roll) deflections around the
+        # resting attitude. Yaw stays pinned at yaw_ref so the matrix
+        # remains valid.
+        accel_auth = 9.81 * math.tan(MAX_TILT_RAD)
+        acc_n = accel_auth * out.tilt_x
+        acc_e = accel_auth * out.tilt_y
+        dp = self.resp_inv[0][0] * acc_n + self.resp_inv[0][1] * acc_e
+        dr = self.resp_inv[1][0] * acc_n + self.resp_inv[1][1] * acc_e
+        dp = max(-MAX_TILT_RAD, min(MAX_TILT_RAD, dp))
+        dr = max(-MAX_TILT_RAD, min(MAX_TILT_RAD, dr))
+        r0, p0 = self._cal_att0
+        pitch = p0 + dp
+        roll = r0 + dr
+        yaw = self.yaw_ref
 
         # Slew-limit attitude targets: rapidly alternating large targets
         # tumbled the sim's stabilizer (run 3).
