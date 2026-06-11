@@ -89,6 +89,30 @@ Also added handlers for HEARTBEAT, COMMAND_ACK, STATUSTEXT for visibility into t
 
 ---
 
+## 2026-06-10 — Sim-Agnostic Planner Working in Elodin
+
+- Strategy shift: develop against the Elodin practice harness (Betaflight SITL,
+  headless on Mac, seconds per iteration); official sim becomes calibration/
+  integration only. See ARCHITECTURE.md "Two-Sim Development Loop".
+- New `planner.py`: sim-agnostic (x, y, alt) world frame, normalized effort
+  outputs; control law is the Elodin baseline's proven per-axis PD + altitude
+  PD+I, with gains normalized out of PWM units.
+- New `elodin_solver.py`: adapter mapping planner efforts → Betaflight RC PWM;
+  gates imported from the sim's course definition (no hardcoding).
+- Result: **3/3 gates, 9.43s lap** (baseline: 9.52s) on first headless run.
+- Cleanup note: a stale `sim/main.py` from the 6/08 editor session had been
+  spinning at 335% CPU for two days and can deadlock new runs (holds the
+  Betaflight bridge ports). `pkill -f sim/main.py` before runs if in doubt.
+- VQ1 doc check (VADR-TS-001): §4.5 telemetry includes "simulator navigation
+  reference data" (= track data), §8.1 objective is course completion, §4.6
+  defers vision to a separate spec → no vision needed for VQ1; planner takes
+  gate list as input so vision can slot in for VQ2 if required.
+- Next: AIGP adapter — feed track-data gates into the same planner, map efforts
+  → SET_ATTITUDE_TARGET quaternion + thrust, calibrate hover/tilt constants in
+  a handful of official-sim runs.
+
+---
+
 ## 2026-06-08 — Pivot to Middle-Tier Cascaded Controller
 
 Decision: single P controller is fragile and won't compete. Build a proper cascaded PID with system identification.
