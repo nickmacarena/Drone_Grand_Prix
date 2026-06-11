@@ -22,8 +22,7 @@ race_started means sim time >= scheduled start (mavlink_rx handles).
 import math
 import time
 
-from attitude import euler_to_quaternion
-from mavlink_tx import send_arm, send_attitude_quaternion
+from mavlink_tx import send_arm, send_attitude_rates
 from planner import PlannerConfig, PlannerState, plan
 from state import SharedState
 
@@ -38,7 +37,7 @@ G = 9.81
 CAL_THRUST = 0.35      # safely above any plausible hover; drone climbs gently
 CAL_DURATION_S = 0.9
 CAL_SKIP_S = 0.3       # ignore the first samples (arming/thrust spool)
-HOVER_MIN, HOVER_MAX = 0.05, 0.8   # sanity clamp on the fitted value
+HOVER_MIN, HOVER_MAX = 0.12, 0.8   # sanity clamp; run 4's trim hit a 0.05 floor and the drone was powerless
 
 # Post-calibration settle: trim hover against vertical speed (integrator —
 # the slope fit lands above true hover because drag confounds it; run 3
@@ -52,6 +51,14 @@ SETTLE_DAMP = 0.4          # vertical effort = clamp(damp * vd, ...)
 # rapidly alternating ±20° targets (run 3 flew inverted, att roll ~180°).
 EFFORT_FLOOR = -0.6        # vertical effort floor → thrust ≥ ~0.5 * hover
 ATT_SLEW_RAD_S = math.radians(90)   # max attitude-target change rate
+
+# Attitude → body-rate P loop. Quaternion attitude mode IGNORES our thrust
+# field (runs 1-4: vd unresponsive to thrust in both directions); body-rates
+# mode demonstrably honors it (2026-06-08 diagnostic). So we close the
+# attitude loop ourselves — same approach as flight_stack.py in Elodin.
+ATT_P = 5.0                    # rad/s of rate per rad of attitude error
+MAX_RATE_RAD_S = 3.0
+YAW_P = 2.0
 
 # Flight mapping
 MAX_TILT_RAD = math.radians(20)
@@ -100,10 +107,35 @@ class Controller:
     def update(self):
         self._maybe_rearm()
         roll, pitch, yaw, thrust = self._step()
-        q = euler_to_quaternion(roll, pitch, yaw)
-        send_attitude_quaternion(self.mavlink_conn, self.system_boot_ms, q, thrust)
+
+        # Attitude P → body rates (the sim honors rates+thrust; it ignores
+        # the thrust field in quaternion mode).
+        ds = self.shared.drone_state
+        if ds is not None:
+            roll_rate = self._clamp_rate(ATT_P * self._wrap(roll - ds.roll_rad))
+            pitch_rate = self._clamp_rate(ATT_P * self._wrap(pitch - ds.pitch_rad))
+            yaw_rate = self._clamp_rate(YAW_P * self._wrap(yaw - ds.yaw_rad))
+        else:
+            roll_rate = pitch_rate = yaw_rate = 0.0
+
+        send_attitude_rates(
+            self.mavlink_conn, self.system_boot_ms,
+            roll_rate, pitch_rate, yaw_rate, thrust,
+        )
         self._maybe_log(roll, pitch, thrust)
         time.sleep(1.0 / CONTROL_HZ)
+
+    @staticmethod
+    def _wrap(a: float) -> float:
+        while a > math.pi:
+            a -= 2.0 * math.pi
+        while a < -math.pi:
+            a += 2.0 * math.pi
+        return a
+
+    @staticmethod
+    def _clamp_rate(r: float) -> float:
+        return max(-MAX_RATE_RAD_S, min(MAX_RATE_RAD_S, r))
 
     def _maybe_rearm(self):
         hb = self.shared.heartbeat
@@ -151,7 +183,8 @@ class Controller:
             else:
                 effort = max(EFFORT_FLOOR, min(1.0, SETTLE_DAMP * ds.vd_mps))
                 thr = self.hover_thrust * (1.0 + VERT_AUTH_FRAC * effort)
-                return 0.0, 0.0, ds.yaw_rad, max(THRUST_MIN, min(THRUST_MAX, thr))
+                r0, p0 = self._cal_att0
+                return r0, p0, ds.yaw_rad, max(THRUST_MIN, min(THRUST_MAX, thr))
 
         # FLY
         return self._fly_step(ds, td, rs)
@@ -160,7 +193,11 @@ class Controller:
         now = time.time()
         if self._cal_t0 is None:
             self._cal_t0 = now
-            print(f"  [CAL] start: thrust={CAL_THRUST} for {CAL_DURATION_S}s", flush=True)
+            # Hold the RESTING attitude during cal (the pad reads pitch ~+18°;
+            # forcing level there would tilt the drone and pollute the fit).
+            self._cal_att0 = (ds.roll_rad, ds.pitch_rad)
+            print(f"  [CAL] start: thrust={CAL_THRUST} for {CAL_DURATION_S}s "
+                  f"(holding att {math.degrees(ds.roll_rad):+.0f},{math.degrees(ds.pitch_rad):+.0f})", flush=True)
 
         elapsed = now - self._cal_t0
         if elapsed > CAL_SKIP_S:
@@ -172,7 +209,8 @@ class Controller:
 
         # Hold CURRENT yaw — drone spawns facing ~south; commanding yaw 0
         # made the stabilizer whip through a 180° flip at the gun (run 1).
-        return 0.0, 0.0, ds.yaw_rad, CAL_THRUST
+        r0, p0 = self._cal_att0
+        return r0, p0, ds.yaw_rad, CAL_THRUST
 
     def _fit_hover(self):
         n = len(self._cal_samples)
