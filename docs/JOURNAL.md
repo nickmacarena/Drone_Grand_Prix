@@ -89,6 +89,32 @@ Also added handlers for HEARTBEAT, COMMAND_ACK, STATUSTEXT for visibility into t
 
 ---
 
+## 2026-06-11 (later) — Bypassed Betaflight; VQ1 Replica COMPLETE 6/6 in 47.29s
+
+Decision (with Nick): stop fixing the broken BF bridge, fly Elodin's clean
+physics directly with our own stack.
+
+- `flight_stack.py`: reduced-attitude P (body-z × desired-z error) → rate P →
+  X-quad mixer, gains derived from the racing preset's known constants.
+  sim/main.py patched to accept DIRECT_MOTORS from the solver (BF still runs
+  in lockstep, output ignored).
+- First flight was textbook: clean takeoff, smooth cruise, motors at the
+  theoretical hover (0.114) — first run all session where throttle authority
+  was real.
+- Easy course: 3/3 in 12.29s after adding pass-through aiming (PD-to-position
+  parks AT the gate; aim ~2.5m past it and let the sim advance the index).
+- VQ1 replica fixes: (1) pass-through offset must be horizontal-only or a
+  descending course crosses the plane below the inner box; (2) altitude
+  i-term windup during long descents — near-disabled the integrator (hover
+  feedforward is exact) and stiffened kd_alt.
+- **VQ1 replica: 6/6 gates, 47.29s** (cap is 8 min). Ready to port.
+
+Port plan: AIGP adapter = same planner + NED→(x,y,alt) conversion + efforts →
+SET_ATTITUDE_TARGET quaternion+thrust (the official sim's stabilizer plays
+flight_stack's role). Re-run system_id-style calibration for hover thrust.
+
+---
+
 ## 2026-06-11 — Elodin Harness Forensics: the Betaflight Bridge Is Broken
 
 Replicated VQ1 in Elodin (sim/course.py VQ1_COURSE from logged track data) and
