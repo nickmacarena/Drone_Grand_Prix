@@ -60,6 +60,14 @@ ATT_P = 5.0                    # rad/s of rate per rad of attitude error
 MAX_RATE_RAD_S = 3.0
 YAW_P = 2.0
 
+# Rate-sign auto-detection: run 5's roll axis hit positive feedback (±150°
+# in under a second), so the sim's body-rate sign convention differs from
+# ours on at least one axis. Pulse each axis briefly and measure which way
+# the attitude actually moves. Convention-proof.
+SIGN_PULSE_RATE = 0.6      # rad/s
+SIGN_PULSE_S = 0.35
+SIGN_MIN_DELTA_RAD = 0.02  # below this, keep default sign
+
 # Flight mapping
 MAX_TILT_RAD = math.radians(20)
 VERT_AUTH_FRAC = 0.8   # thrust = hover * (1 + frac * vertical_effort)
@@ -95,6 +103,13 @@ class Controller:
         self._last_roll_cmd = 0.0
         self._last_pitch_cmd = 0.0
         self._last_cmd_t = None
+        # Rate-sign detection state
+        self.rate_sign = [1.0, 1.0, 1.0]       # roll, pitch, yaw multipliers
+        self._sign_axis = 0                     # which axis is being tested
+        self._sign_t0 = None
+        self._sign_att0 = None
+        self._signs_done = False
+        self._direct_rates = None               # when set, update() sends these raw
         self._last_arm_t = 0.0
         self._last_log_t = 0.0
         self._logged_gates = False
@@ -108,13 +123,16 @@ class Controller:
         self._maybe_rearm()
         roll, pitch, yaw, thrust = self._step()
 
-        # Attitude P → body rates (the sim honors rates+thrust; it ignores
-        # the thrust field in quaternion mode).
         ds = self.shared.drone_state
-        if ds is not None:
-            roll_rate = self._clamp_rate(ATT_P * self._wrap(roll - ds.roll_rad))
-            pitch_rate = self._clamp_rate(ATT_P * self._wrap(pitch - ds.pitch_rad))
-            yaw_rate = self._clamp_rate(YAW_P * self._wrap(yaw - ds.yaw_rad))
+        if self._direct_rates is not None:
+            # Sign-detection pulse in progress: send raw rates.
+            roll_rate, pitch_rate, yaw_rate = self._direct_rates
+        elif ds is not None:
+            # Attitude P → body rates with detected signs (the sim honors
+            # rates+thrust; it ignores the thrust field in quaternion mode).
+            roll_rate = self.rate_sign[0] * self._clamp_rate(ATT_P * self._wrap(roll - ds.roll_rad))
+            pitch_rate = self.rate_sign[1] * self._clamp_rate(ATT_P * self._wrap(pitch - ds.pitch_rad))
+            yaw_rate = self.rate_sign[2] * self._clamp_rate(YAW_P * self._wrap(yaw - ds.yaw_rad))
         else:
             roll_rate = pitch_rate = yaw_rate = 0.0
 
@@ -179,12 +197,19 @@ class Controller:
 
             if abs(ds.vd_mps) < SETTLE_VD_MPS or now - self._settle_t0 > SETTLE_MAX_S:
                 self._settled = True
+                # The drone is demonstrably flying; never let the planner's
+                # takeoff latch suppress horizontal control (run 5).
+                self.planner_state.airborne = True
                 print(f"  [CAL] settled: vd={ds.vd_mps:+.2f}, trimmed hover={self.hover_thrust:.3f}", flush=True)
             else:
                 effort = max(EFFORT_FLOOR, min(1.0, SETTLE_DAMP * ds.vd_mps))
                 thr = self.hover_thrust * (1.0 + VERT_AUTH_FRAC * effort)
                 r0, p0 = self._cal_att0
                 return r0, p0, ds.yaw_rad, max(THRUST_MIN, min(THRUST_MAX, thr))
+
+        # SIGN DETECTION: pulse each body axis, watch the attitude response.
+        if not self._signs_done:
+            return self._sign_step(ds)
 
         # FLY
         return self._fly_step(ds, td, rs)
@@ -227,6 +252,35 @@ class Controller:
         accel_up = -accel_down
         hover = CAL_THRUST * G / max(accel_up + G, 1.0)
         return max(HOVER_MIN, min(HOVER_MAX, hover))
+
+    def _sign_step(self, ds):
+        """Pulse one axis at a time; set rate_sign from the attitude response."""
+        now = time.time()
+        att = (ds.roll_rad, ds.pitch_rad, ds.yaw_rad)
+
+        if self._sign_t0 is None:
+            self._sign_t0 = now
+            self._sign_att0 = att
+            pulse = [0.0, 0.0, 0.0]
+            pulse[self._sign_axis] = SIGN_PULSE_RATE
+            self._direct_rates = tuple(pulse)
+            print(f"  [SIGN] pulsing axis {self._sign_axis}", flush=True)
+
+        if now - self._sign_t0 >= SIGN_PULSE_S:
+            delta = self._wrap(att[self._sign_axis] - self._sign_att0[self._sign_axis])
+            if abs(delta) >= SIGN_MIN_DELTA_RAD:
+                self.rate_sign[self._sign_axis] = 1.0 if delta > 0 else -1.0
+            print(f"  [SIGN] axis {self._sign_axis}: delta={math.degrees(delta):+.1f} deg "
+                  f"-> sign {self.rate_sign[self._sign_axis]:+.0f}", flush=True)
+            self._sign_axis += 1
+            self._sign_t0 = None
+            if self._sign_axis >= 3:
+                self._signs_done = True
+                self._direct_rates = None
+                print(f"  [SIGN] done: {self.rate_sign}", flush=True)
+
+        # Hover thrust during the test; attitude args unused while pulsing.
+        return 0.0, 0.0, ds.yaw_rad, self.hover_thrust
 
     def _fly_step(self, ds, td, rs):
         # NED → planner frame (x=north, y=east, alt up)
