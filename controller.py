@@ -85,6 +85,17 @@ TILT_TEST_RAD = math.radians(12)
 TILT_TEST_S = 0.8
 M_DET_MIN = 0.5            # (m/s²/rad)² — below this the matrix is garbage
 
+# Track data reports each gate's BASE/mount z, not the opening center:
+# run 14 crossed gate 0's plane dead-center laterally at pad level and flew
+# UNDER the opening (Nick's visual + crossing telemetry). Frame is 2.7 m
+# outer / 1.5 m inner → opening center ≈ 1.35 m above the base.
+# VERIFY against the crossing altitude in the next run's log.
+GATE_OPENING_OFFSET_M = 1.35
+
+# Ease the planner handoff: full tilt authority ramps in over this long
+# (kills the r=-20 jerk at mission/fly start).
+EASE_IN_S = 1.5
+
 # Flight mapping
 MAX_TILT_RAD = math.radians(20)
 VERT_AUTH_FRAC = 0.8   # thrust = hover * (1 + frac * vertical_effort)
@@ -399,7 +410,9 @@ class Controller:
         # NED → planner frame (x=north, y=east, alt up)
         pos = (ds.north_m, ds.east_m, -ds.down_m)
         vel = (ds.vn_mps, ds.ve_mps, -ds.vd_mps)
-        gates = tuple((g.north_m, g.east_m, -g.down_m) for g in td.gates)
+        gates = tuple(
+            (g.north_m, g.east_m, -g.down_m + GATE_OPENING_OFFSET_M) for g in td.gates
+        )
 
         idx = rs.active_gate_index
         if rs.race_finished:
@@ -409,6 +422,11 @@ class Controller:
             self.planner_state, PLANNER_CFG,
             time.time(), pos, vel, gates, idx,
         )
+        if not hasattr(self, "_fly_t0") or self._fly_t0 is None:
+            self._fly_t0 = time.time()
+        ease = min(1.0, (time.time() - self._fly_t0) / EASE_IN_S)
+        out = type(out)(tilt_x=out.tilt_x * ease, tilt_y=out.tilt_y * ease,
+                        vertical=out.vertical)
         # For telemetry: the goal the planner is actually steering toward.
         from planner import select_goal
         self._last_goal = select_goal(

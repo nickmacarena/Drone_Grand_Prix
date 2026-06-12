@@ -63,6 +63,8 @@ class PlannerState:
     last_t: float = 0.0
     spawn: Vec3 | None = None       # captured on first plan() call
     airborne: bool = False          # latched once takeoff completes
+    retry_latch: bool = False       # committed to the approach point
+    retry_idx: int = -999           # gate index the latch belongs to
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,7 @@ def select_goal(
     pass_through_m: float,
     pos: Vec3 | None = None,
     retry_behind_m: float = 4.0,
+    state: "PlannerState | None" = None,
 ) -> Vec3:
     """Aim point: active gate center pushed past the gate plane.
 
@@ -117,10 +120,23 @@ def select_goal(
         past = rx * ux + ry * uy            # signed distance past the plane
         lateral = abs(-rx * uy + ry * ux)   # distance off the gate axis
 
-        # Past the plane without an index advance → we missed; or close to
-        # the gate but far off-axis → a straight line would cut through the
-        # frame. Either way, go to the approach point upstream ON the axis.
-        if past > pass_through_m * 0.6 or (lateral > 1.2 and past > -retry_behind_m):
+        # Missed the plane, or off-axis near the gate → retreat to the
+        # approach point upstream ON the axis. The decision is LATCHED
+        # (hysteresis): flickering between aim and retry at the threshold
+        # caused ±20° command chatter while hovering at the plane (run 14).
+        trigger = past > pass_through_m * 0.6 or (lateral > 1.2 and past > -retry_behind_m * 0.75)
+        if state is not None:
+            if state.retry_idx != next_gate_index:
+                state.retry_latch = False
+                state.retry_idx = next_gate_index
+            if not state.retry_latch and trigger:
+                state.retry_latch = True
+            elif state.retry_latch and past < -retry_behind_m * 0.5 and lateral <= 1.0:
+                state.retry_latch = False
+            retreat = state.retry_latch
+        else:
+            retreat = trigger
+        if retreat:
             return (gate[0] - ux * retry_behind_m, gate[1] - uy * retry_behind_m, gate[2])
 
     return (gate[0] + ux * pass_through_m, gate[1] + uy * pass_through_m, gate[2])
@@ -145,7 +161,7 @@ def plan(
     if state.spawn is None:
         state.spawn = (x, y, alt)
 
-    goal = select_goal(gates, next_gate_index, state.spawn, cfg.pass_through_m, pos=pos)
+    goal = select_goal(gates, next_gate_index, state.spawn, cfg.pass_through_m, pos=pos, state=state)
 
     # Takeoff completes (and latches) once we've climbed clear of the spawn
     # or risen to within a band of the goal altitude. The latch matters on
