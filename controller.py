@@ -88,8 +88,10 @@ THRUST_MIN, THRUST_MAX = 0.02, 0.9
 #   horizontal accel ≈ g·tan(20°) ≈ 3.6 m/s² at |tilt|=1  → ωn≈1.0, ζ≈1
 #   vertical accel  ≈ g·VERT_AUTH ≈ 7.8 m/s² at |vert|=1  → ωn≈1.2, ζ≈1
 PLANNER_CFG = PlannerConfig(
-    kp_x=0.28, kd_x=0.56,
-    kp_y=0.28, kd_y=0.56,
+    # Overdamped vs Elodin: authority here is ~3.5 m/s² and run 8 overshot
+    # gate 0 by 22 m carrying self-test lateral error into the approach.
+    kp_x=0.20, kd_x=0.80,
+    kp_y=0.20, kd_y=0.80,
     kp_alt=0.18, kd_alt=0.31, ki_alt=0.005, i_clamp=0.06,
     takeoff_clear_m=1.0,
     takeoff_goal_band_m=1.0,

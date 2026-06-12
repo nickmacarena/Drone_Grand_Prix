@@ -81,6 +81,8 @@ def select_goal(
     next_gate_index: int,
     spawn: Vec3,
     pass_through_m: float,
+    pos: Vec3 | None = None,
+    retry_behind_m: float = 4.0,
 ) -> Vec3:
     """Aim point: active gate center pushed past the gate plane.
 
@@ -88,6 +90,10 @@ def select_goal(
     spawn point, for gate 0) to the active gate. Aiming past the plane keeps
     speed up through the crossing; the sim advances the index at the plane.
     Out-of-range index → last gate (race finished / pre-start default).
+
+    Gate-miss recovery: if `pos` is already PAST the gate plane but the index
+    hasn't advanced (we crossed outside the inner square), aim at a point
+    upstream of the gate so the drone loops back and re-attempts the pass.
     """
     if not gates:
         return (0.0, 0.0, 0.0)
@@ -102,8 +108,15 @@ def select_goal(
     norm = math.sqrt(dx * dx + dy * dy)
     if norm < 1e-6:
         return gate
-    s = pass_through_m / norm
-    return (gate[0] + dx * s, gate[1] + dy * s, gate[2])
+    ux, uy = dx / norm, dy / norm
+
+    if pos is not None and 0 <= next_gate_index < len(gates):
+        # Signed distance past the gate plane along the through-direction.
+        past = (pos[0] - gate[0]) * ux + (pos[1] - gate[1]) * uy
+        if past > pass_through_m * 0.6:
+            return (gate[0] - ux * retry_behind_m, gate[1] - uy * retry_behind_m, gate[2])
+
+    return (gate[0] + ux * pass_through_m, gate[1] + uy * pass_through_m, gate[2])
 
 
 def plan(
@@ -125,7 +138,7 @@ def plan(
     if state.spawn is None:
         state.spawn = (x, y, alt)
 
-    goal = select_goal(gates, next_gate_index, state.spawn, cfg.pass_through_m)
+    goal = select_goal(gates, next_gate_index, state.spawn, cfg.pass_through_m, pos=pos)
 
     # Takeoff completes (and latches) once we've climbed clear of the spawn
     # or risen to within a band of the goal altitude. The latch matters on
