@@ -89,6 +89,42 @@ Also added handlers for HEARTBEAT, COMMAND_ACK, STATUSTEXT for visibility into t
 
 ---
 
+## 2026-06-12 — ★ VQ1 COMPLETE IN THE OFFICIAL SIMULATOR — 6/6 GATES ★
+
+Sixteen race attempts over two days, each fixing one measured problem. The
+working architecture, end to end:
+
+    race start → CAL (0.9s, zero rates + fixed thrust → hover fit)
+              → SIGN (pulse each axis → body-rate sign conventions)
+              → SETTLE (level, trim hover vs vertical speed)
+              → MAP (hold small tilts → 2x2 attitude→accel response matrix)
+              → FLY (planner → matrix⁻¹ → rate commands at 100 Hz)
+
+Every plant parameter is measured in-race in ~5 s — nothing assumed. The
+same planner that swept the Elodin replica runs unchanged on top.
+
+Hard-won sim facts (validated, not inferred):
+- Only body-rates+thrust commands are honored; quaternion-attitude mode
+  ignores the thrust field entirely.
+- Body-rate sign conventions vs MAVLink standard: roll +, pitch −, yaw −
+  (reproducible across 6+ runs).
+- ATTITUDE telemetry is physical attitude; the start pad is a real ~18°
+  ramp (every run reads +18 pitch at rest).
+- Track-data gate z is the gate BASE, not the opening: aim 1.35 m higher
+  (2.7 m outer frame). Run 14 flew under; run 16 crossed mid-box.
+- Drone yaw spawns ~140°; never command yaw motion — pin it.
+- Hover thrust ≈ 0.25 (auto-measured each run; varies slightly).
+
+Stage discipline (per Nick, after run 12): MISSION=hover → waypoint → race,
+each gated on a clean log. Hover and waypoint stages passed first try once
+calibration ran open-loop before sign detection.
+
+Run 16: all 6 gates, ~95 s, finish detected, clean exit. Run record
+uploaded by the sim. VQ1 ✓ — next: verify the portal shows the run, then
+VQ2 prep (visually complex; reread the spec when it drops).
+
+---
+
 ## 2026-06-11 (later) — Bypassed Betaflight; VQ1 Replica COMPLETE 6/6 in 47.29s
 
 Decision (with Nick): stop fixing the broken BF bridge, fly Elodin's clean
