@@ -20,6 +20,7 @@ race_started means sim time >= scheduled start (mavlink_rx handles).
 """
 
 import math
+import os
 import time
 
 from mavlink_tx import send_arm, send_attitude_rates
@@ -30,6 +31,11 @@ from state import SharedState
 CONTROL_HZ = 100
 REARM_PERIOD_S = 0.5
 LOG_PERIOD_S = 1.0
+
+# Staged bring-up: hover -> waypoint -> race. Set via env var, e.g.
+#   $env:MISSION="hover"; python main.py
+MISSION = os.environ.get("MISSION", "hover").lower()
+WAYPOINT_OFFSET = (-10.0, 0.0)   # 10 m south of the pad, same altitude
 
 G = 9.81
 
@@ -201,12 +207,17 @@ class Controller:
         if ds is None or td is None or rs is None or not rs.race_started:
             return 0.0, 0.0, (ds.yaw_rad if ds else 0.0), 0.0
 
-        # CALIBRATE: fixed thrust, level, fit hover from vertical accel.
+        # CALIBRATE: fixed thrust, ZERO body rates (open loop — rate signs
+        # are unknown until the SIGN phase; closing the attitude loop here
+        # tumbled the drone in run 12).
         if self.hover_thrust is None:
             return self._calibrate_step(ds)
 
-        # SETTLE: trim the hover estimate against vertical speed and bleed
-        # off the calibration climb before handing to the planner.
+        # SIGN DETECTION: pulse each body axis, watch the attitude response.
+        if not self._signs_done:
+            return self._sign_step(ds)
+
+        # SETTLE: level out (signs now known), trim the hover estimate.
         if not self._settled:
             now = time.time()
             if self._settle_t0 is None:
@@ -231,26 +242,22 @@ class Controller:
                 thr = self.hover_thrust * (1.0 + VERT_AUTH_FRAC * effort)
                 return 0.0, 0.0, ds.yaw_rad, max(THRUST_MIN, min(THRUST_MAX, thr))
 
-        # SIGN DETECTION: pulse each body axis, watch the attitude response.
-        if not self._signs_done:
-            return self._sign_step(ds)
-
         # TILT-MAP DETECTION: hold small tilts, watch which way velocity builds.
         if not self._maps_done:
             return self._map_step(ds)
 
-        # FLY
-        return self._fly_step(ds, td, rs)
+        # MISSION
+        if MISSION == "race":
+            return self._fly_step(ds, td, rs)
+        return self._mission_step(ds)
 
     def _calibrate_step(self, ds):
         now = time.time()
         if self._cal_t0 is None:
             self._cal_t0 = now
-            # Hold the RESTING attitude during cal (the pad reads pitch ~+18°;
-            # forcing level there would tilt the drone and pollute the fit).
             self._cal_att0 = (ds.roll_rad, ds.pitch_rad)
-            print(f"  [CAL] start: thrust={CAL_THRUST} for {CAL_DURATION_S}s "
-                  f"(holding att {math.degrees(ds.roll_rad):+.0f},{math.degrees(ds.pitch_rad):+.0f})", flush=True)
+            self._direct_rates = (0.0, 0.0, 0.0)   # open loop: zero rates
+            print(f"  [CAL] start: thrust={CAL_THRUST} for {CAL_DURATION_S}s (zero rates)", flush=True)
 
         elapsed = now - self._cal_t0
         if elapsed > CAL_SKIP_S:
@@ -258,6 +265,7 @@ class Controller:
 
         if elapsed >= CAL_DURATION_S:
             self.hover_thrust = self._fit_hover()
+            self._direct_rates = None
             print(f"  [CAL] hover_thrust = {self.hover_thrust:.3f}", flush=True)
 
         # Hold CURRENT yaw — drone spawns facing ~south; commanding yaw 0
@@ -363,6 +371,30 @@ class Controller:
             self.resp_inv = ((d / det, -b / det), (-c / det, a / det))
         print(f"  [MAP] matrix done: det={det:+.2f}", flush=True)
 
+    def _mission_step(self, ds):
+        """Stage A/B missions: hold position, or fly to one waypoint and hold."""
+        if not hasattr(self, "_hold_target") or self._hold_target is None:
+            alt = -ds.down_m
+            if MISSION == "waypoint":
+                tgt = (ds.north_m + WAYPOINT_OFFSET[0], ds.east_m + WAYPOINT_OFFSET[1], alt)
+            else:
+                tgt = (ds.north_m, ds.east_m, alt)
+            self._hold_target = tgt
+            print(f"  [MISSION] {MISSION}: target=({tgt[0]:.1f},{tgt[1]:.1f},alt {tgt[2]:.1f})", flush=True)
+
+        gx, gy, galt = self._hold_target
+        # Same PD law and gains as the planner, applied to a fixed target.
+        cfg = PLANNER_CFG
+        tilt_x = max(-1.0, min(1.0, cfg.kp_x * (gx - ds.north_m) - cfg.kd_x * ds.vn_mps))
+        tilt_y = max(-1.0, min(1.0, cfg.kp_y * (gy - ds.east_m) - cfg.kd_y * ds.ve_mps))
+        alt = -ds.down_m
+        v_alt = -ds.vd_mps
+        vertical = max(EFFORT_FLOOR, min(1.0, cfg.kp_alt * (galt - alt) - cfg.kd_alt * v_alt))
+
+        self._last_goal = self._hold_target
+        self._last_tilt = (tilt_x, tilt_y)
+        return self._efforts_to_attitude(tilt_x, tilt_y, vertical)
+
     def _fly_step(self, ds, td, rs):
         # NED → planner frame (x=north, y=east, alt up)
         pos = (ds.north_m, ds.east_m, -ds.down_m)
@@ -384,23 +416,20 @@ class Controller:
         )
         self._last_tilt = (out.tilt_x, out.tilt_y)
 
-        # Efforts → attitude via the measured response matrix. Desired
-        # world-frame acceleration → (pitch, roll) deflections around the
-        # resting attitude. Yaw stays pinned at yaw_ref so the matrix
-        # remains valid.
+        return self._efforts_to_attitude(out.tilt_x, out.tilt_y, out.vertical)
+
+    def _efforts_to_attitude(self, tilt_x, tilt_y, vertical):
+        # Efforts → attitude via the measured response matrix; yaw pinned.
         accel_auth = 9.81 * math.tan(MAX_TILT_RAD)
-        acc_n = accel_auth * out.tilt_x
-        acc_e = accel_auth * out.tilt_y
+        acc_n = accel_auth * tilt_x
+        acc_e = accel_auth * tilt_y
         dp = self.resp_inv[0][0] * acc_n + self.resp_inv[0][1] * acc_e
         dr = self.resp_inv[1][0] * acc_n + self.resp_inv[1][1] * acc_e
-        dp = max(-MAX_TILT_RAD, min(MAX_TILT_RAD, dp))
-        dr = max(-MAX_TILT_RAD, min(MAX_TILT_RAD, dr))
-        pitch = dp
-        roll = dr
+        pitch = max(-MAX_TILT_RAD, min(MAX_TILT_RAD, dp))
+        roll = max(-MAX_TILT_RAD, min(MAX_TILT_RAD, dr))
         yaw = self.yaw_ref
 
-        # Slew-limit attitude targets: rapidly alternating large targets
-        # tumbled the sim's stabilizer (run 3).
+        # Slew-limit attitude targets (run 3 tumbled on square waves).
         now = time.time()
         dt = max(1e-3, now - self._last_cmd_t) if self._last_cmd_t else 1.0 / CONTROL_HZ
         self._last_cmd_t = now
@@ -410,7 +439,7 @@ class Controller:
         self._last_roll_cmd = roll
         self._last_pitch_cmd = pitch
 
-        vertical = max(EFFORT_FLOOR, min(1.0, out.vertical))
+        vertical = max(EFFORT_FLOOR, min(1.0, vertical))
         thrust = self.hover_thrust * (1.0 + VERT_AUTH_FRAC * vertical)
         thrust = max(THRUST_MIN, min(THRUST_MAX, thrust))
 
