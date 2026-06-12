@@ -107,6 +107,9 @@ class Controller:
         self.shared = shared
         self.system_boot_ms = system_boot_ms
         self.planner_state = PlannerState()
+        # LOCAL_POSITION_NED's origin IS the start pad: anchor the course
+        # direction for gate 0 there, not wherever the self-tests drifted us.
+        self.planner_state.spawn = (0.0, 0.0, 0.0)
         self.hover_thrust = None        # set by calibration
         self._cal_t0 = None
         self._cal_samples = []          # (t, vd)

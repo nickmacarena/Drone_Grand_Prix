@@ -111,9 +111,16 @@ def select_goal(
     ux, uy = dx / norm, dy / norm
 
     if pos is not None and 0 <= next_gate_index < len(gates):
-        # Signed distance past the gate plane along the through-direction.
-        past = (pos[0] - gate[0]) * ux + (pos[1] - gate[1]) * uy
-        if past > pass_through_m * 0.6:
+        # Position relative to the gate, decomposed along/across its axis.
+        rx = pos[0] - gate[0]
+        ry = pos[1] - gate[1]
+        past = rx * ux + ry * uy            # signed distance past the plane
+        lateral = abs(-rx * uy + ry * ux)   # distance off the gate axis
+
+        # Past the plane without an index advance → we missed; or close to
+        # the gate but far off-axis → a straight line would cut through the
+        # frame. Either way, go to the approach point upstream ON the axis.
+        if past > pass_through_m * 0.6 or (lateral > 1.2 and past > -retry_behind_m):
             return (gate[0] - ux * retry_behind_m, gate[1] - uy * retry_behind_m, gate[2])
 
     return (gate[0] + ux * pass_through_m, gate[1] + uy * pass_through_m, gate[2])
