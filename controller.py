@@ -377,6 +377,12 @@ class Controller:
             self.planner_state, PLANNER_CFG,
             time.time(), pos, vel, gates, idx,
         )
+        # For telemetry: the goal the planner is actually steering toward.
+        from planner import select_goal
+        self._last_goal = select_goal(
+            gates, idx, self.planner_state.spawn, PLANNER_CFG.pass_through_m, pos=pos
+        )
+        self._last_tilt = (out.tilt_x, out.tilt_y)
 
         # Efforts → attitude via the measured response matrix. Desired
         # world-frame acceleration → (pitch, roll) deflections around the
@@ -441,4 +447,12 @@ class Controller:
         hb_str = f"armed={hb.armed}" if hb else "hb=None"
         hov = f"{self.hover_thrust:.3f}" if self.hover_thrust is not None else "uncal"
         att = f"r={math.degrees(roll):+.0f} p={math.degrees(pitch):+.0f} thr={thrust:.2f} hov={hov}"
-        print(f"  {ds_str}  {rs_str}  {hb_str}  {att}", flush=True)
+        goal = getattr(self, "_last_goal", None)
+        tilt = getattr(self, "_last_tilt", None)
+        extra = ""
+        if goal is not None and tilt is not None:
+            extra = (
+                f"  goal=({goal[0]:.1f},{goal[1]:.1f},{goal[2]:.1f})"
+                f" tilt=({tilt[0]:+.2f},{tilt[1]:+.2f})"
+            )
+        print(f"  {ds_str}  {rs_str}  {hb_str}  {att}{extra}", flush=True)
