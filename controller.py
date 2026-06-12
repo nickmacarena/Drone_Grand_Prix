@@ -229,8 +229,7 @@ class Controller:
             else:
                 effort = max(EFFORT_FLOOR, min(1.0, SETTLE_DAMP * ds.vd_mps))
                 thr = self.hover_thrust * (1.0 + VERT_AUTH_FRAC * effort)
-                r0, p0 = self._cal_att0
-                return r0, p0, ds.yaw_rad, max(THRUST_MIN, min(THRUST_MAX, thr))
+                return 0.0, 0.0, ds.yaw_rad, max(THRUST_MIN, min(THRUST_MAX, thr))
 
         # SIGN DETECTION: pulse each body axis, watch the attitude response.
         if not self._signs_done:
@@ -263,8 +262,9 @@ class Controller:
 
         # Hold CURRENT yaw — drone spawns facing ~south; commanding yaw 0
         # made the stabilizer whip through a 180° flip at the gun (run 1).
-        r0, p0 = self._cal_att0
-        return r0, p0, ds.yaw_rad, CAL_THRUST
+        # Hold LEVEL: reported attitude is physical attitude; the pad's +18
+        # reading is a real ramp tilt, not an offset (run 11).
+        return 0.0, 0.0, ds.yaw_rad, CAL_THRUST
 
     def _fit_hover(self):
         n = len(self._cal_samples)
@@ -323,7 +323,7 @@ class Controller:
             self.yaw_ref = ds.yaw_rad
             print(f"  [MAP] yaw pinned at {math.degrees(self.yaw_ref):+.0f} deg", flush=True)
 
-        r0, p0 = self._cal_att0
+        r0, p0 = 0.0, 0.0
 
         if self._map_t0 is None:
             self._map_t0 = now
@@ -395,9 +395,8 @@ class Controller:
         dr = self.resp_inv[1][0] * acc_n + self.resp_inv[1][1] * acc_e
         dp = max(-MAX_TILT_RAD, min(MAX_TILT_RAD, dp))
         dr = max(-MAX_TILT_RAD, min(MAX_TILT_RAD, dr))
-        r0, p0 = self._cal_att0
-        pitch = p0 + dp
-        roll = r0 + dr
+        pitch = dp
+        roll = dr
         yaw = self.yaw_ref
 
         # Slew-limit attitude targets: rapidly alternating large targets
