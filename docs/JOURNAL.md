@@ -181,6 +181,44 @@ camera is not on the critical path — see the split below.
   imagery. Keep the interface narrow (frame in -> bearing + confidence out)
   so 3b drops into 3a without touching control.
 
+### Stage 3a — bearing-only flight: PASS (6/6 gates, 53.60 s)
+The full VQ2 control architecture, validated end to end in Elodin:
+attitude from the IMU estimator, steering from a gate bearing, and **no
+position, velocity or gate coordinates anywhere in the control path**.
+53.60 s vs 47.29 s for the VQ1 position-based solution — 13 % slower, which
+is a fair price for flying half-blind.
+
+Ground truth is used for exactly one thing: standing in for the camera via
+`bearing.observe_from_truth()`. The controller only ever sees
+(az, el, width_px, confidence), so a real detector drops in unchanged.
+
+Three real bugs, every one caught OFFLINE rather than in sim runs:
+
+1. **Elevation coupled to our own pitch.** Raw camera `el` cannot tell "gate
+   is above me" from "I am pitched nose-down to cruise". The vertical loop
+   chased its own attitude, climbed 5 m over gate 0, pushed it out of the
+   vertical FOV and searched forever. Fix: `bearing.stabilized_bearing()`
+   de-rotates the sighting into a LEVEL frame using the IMU estimate, so
+   el = 0 means "gate at my altitude", independent of camera mounting tilt.
+   This is the payoff for having built the estimator first.
+2. **Yaw steered the wrong way.** In FLU +body-z is UP, so a positive yaw
+   rate turns LEFT, while positive azimuth means RIGHT. az grew +1 -> +15 deg
+   under "correction" until the gate left frame. YAW_SIGN = -1 (Elodin FLU),
+   +1 (official sim FRD).
+3. **A 20 deg up-tilted camera cannot see below ~9 deg of the flight path.**
+   VADR-TS-002 mounts the camera +20 deg up with a 58.7 deg vertical FOV, so
+   a gate BELOW is not dim or partial — it is absent from the image, and a
+   yaw-only sweep hunts past it forever. This is a permanent property of the
+   competition hardware, not a coding slip, and it matters: VQ1's course
+   descends 26 m. Search now descends and creeps forward to raise a low gate
+   back into frame.
+
+`tests/test_servo.py` is the tool that found #2 and #3: it runs the REAL
+bearing+servo code against a 20-line kinematic vehicle and proves the chain
+(geometry -> projection -> level bearing -> servo -> motion -> convergence)
+in milliseconds, in both frame conventions. 8/8 cases converge. Same leverage
+the synthetic IMU test gave Stage 1.
+
 ### Vision deps on the Windows ARM VM: SOLVED (no opencv needed)
 PyPI 2026-07-26: **opencv-python has NO win_arm64 wheels at any version**
 (and no cp314 win_amd64) — but **Pillow ships cp314 win_arm64**, as does
