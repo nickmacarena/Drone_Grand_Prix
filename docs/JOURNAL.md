@@ -140,12 +140,56 @@ ground-truth solver, full VQ1-replica lap):
   alone. Fine by design: VQ2 control is visual servoing on body-relative
   bearings, so absolute heading is never needed.
 
-### Known Stage-3 blocker: vision deps on the Windows ARM VM
-Checked PyPI 2026-07-26: numpy ships cp314 win_arm64 wheels (2.5.1), but
-**opencv-python has NO win_arm64 wheels at any version, and no cp314
-win_amd64 either**. Options: MSVC build tools + source build; an older x64
-Python under emulation (opencv ships win_amd64 for <=cp313); or hand-rolled
-detection on raw JPEG bytes without cv2. Needs solving before Stage 4.
+### Stage 2 — closed-loop on the estimator: PASS
+`ATT_SOURCE=truth|imu` switch in elodin_solver (one code path, not a fork).
+With `imu`, attitude for the whole control stack comes from the estimator
+alone; position/velocity still from truth, isolating the attitude variable.
+
+**6/6 gates in 47.54 s** vs 47.29 s on ground truth — near-identical. Proof
+the switch really took effect: the sim is deterministic, and the gate splits
+differ (6.67 vs 6.98 at gate 0), so this was a genuinely different flight.
+
+### Stage 3 — Elodin's FPV camera has never worked; DECISION: stop fixing it
+Building a labeled frame dataset (frames + pose + gate truth, so detection can
+be developed offline) surfaced why every run since day one reported
+`FPV frames: 0`. Three separate defects:
+1. `sim/camera.py register()` shipped `far=0.65` — a 65 cm far clipping plane
+   on an FPV racing camera. Every gate is clipped out of existence. (patched
+   locally -> 400 m)
+2. `sim/main.py` only accepted a frame when `tick == _last_render_tick`, i.e.
+   in the SAME tick it was requested; any render latency discards every frame.
+   (patched locally -> pair one frame per request, report latency)
+3. `ctx.render_cameras()` raises **"No render bridge available"** in BOTH
+   `elodin run` and `elodin editor`. Likely cause: version skew — CLI is
+   0.17.3 (from scripts/install_elodin.sh) while pyproject pins the SDK to
+   `elodin==0.17.2`, and the render bridge is exactly the sim-process <->
+   render-server protocol between them. Untested fix: align the two versions.
+
+**Decision: do not chase this further now.** Rationale: (a) fixing it risks
+destabilizing the control stack that currently works, (b) Elodin's gates are
+simple GLB models while VQ2's courses are high-fidelity 3D scans, so a
+detector tuned on Elodin imagery would not transfer anyway, and (c) the
+camera is not on the critical path — see the split below.
+
+**Decoupling the two hard problems** (each testable independently):
+- *3a — control on bearings* (Elodin, fast, NO camera needed): compute the
+  gate's true bearing analytically from pose+gate truth and feed the servoing
+  controller only that bearing. Validates the VQ2 control architecture, which
+  must fly with no position and no velocity.
+- *3b — image -> bearing* (needs real frames): capture VQ2 frames to disk from
+  the official sim, then develop the detector offline against authoritative
+  imagery. Keep the interface narrow (frame in -> bearing + confidence out)
+  so 3b drops into 3a without touching control.
+
+### Vision deps on the Windows ARM VM: SOLVED (no opencv needed)
+PyPI 2026-07-26: **opencv-python has NO win_arm64 wheels at any version**
+(and no cp314 win_amd64) — but **Pillow ships cp314 win_arm64**, as does
+numpy (2.5.1) and simplejpeg. So `pip install pillow numpy` gives JPEG decode
++ array math on the VM with zero compilation: no MSVC, no x64 emulation.
+
+**Constraint for all vision code: numpy + Pillow only.** cv2 exists in the
+Mac-side elodin venv and is fine for prototyping//analysis, but anything that
+ships must import only numpy and PIL.
 
 ---
 
