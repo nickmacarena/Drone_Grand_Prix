@@ -36,6 +36,13 @@ from bearing import (  # noqa: E402
 YAW_SIGN_FLU = -1.0
 YAW_SIGN_FRD = +1.0
 
+# Pitch sign that puts the NOSE DOWN for positive forward tilt. Rotating +x
+# about +y by t gives (cos t, 0, -sin t): that is nose-down in FLU (+z up)
+# and nose-up in FRD (+z down), so the frames need opposite signs.
+PITCH_SIGN_FLU = +1.0
+PITCH_SIGN_FRD = -1.0
+MAX_TILT_RAD = math.radians(25.0)   # matches flight_stack
+
 _fails = []
 
 
@@ -46,7 +53,7 @@ def check(name, cond, detail=""):
 
 
 def fly(gate, start=(0.0, 0.0, 0.0), heading0=0.0, *, cam, up_world, yaw_sign,
-        enu=True, speed=8.0, climb=6.0, dt=0.02, duration=25.0):
+        pitch_sign, enu=True, speed=8.0, climb=6.0, dt=0.02, duration=25.0):
     """Kinematic pursuit. Returns (min_distance, reached, track)."""
     cfg = servo.ServoConfig()
     st = servo.ServoState()
@@ -56,13 +63,14 @@ def fly(gate, start=(0.0, 0.0, 0.0), heading0=0.0, *, cam, up_world, yaw_sign,
     best = float("inf")
     track = []
 
+    pitch = 0.0
     while t < duration:
-        # Level flight at the current heading (roll/pitch ignored: this test
-        # is about the steering chain, not the attitude loop).
-        if enu:
-            q = euler_to_quaternion(0.0, 0.0, heading)
-        else:
-            q = euler_to_quaternion(0.0, 0.0, heading)
+        # Model the pitch the flight stack would hold for this forward tilt.
+        # This is NOT cosmetic: the camera is body-mounted, so nose-down
+        # pitch swings its view from ~9 deg below the flight path to ~23 deg.
+        # A level-flight model cannot see that mechanism and wrongly reports
+        # that a low gate is unreachable.
+        q = euler_to_quaternion(0.0, pitch_sign * pitch, heading)
 
         obs = observe_from_truth(cam, q, (x, y, z), gate)
         target = None
@@ -79,6 +87,7 @@ def fly(gate, start=(0.0, 0.0, 0.0), heading0=0.0, *, cam, up_world, yaw_sign,
         #   FRD (+z down) -> +body_z turns RIGHT -> +1
         body_z_rate = yaw_sign * out.yaw_rate
         heading += body_z_rate * dt
+        pitch += 6.0 * (out.tilt_fwd * MAX_TILT_RAD - pitch) * dt  # first-order lag
         v = speed * out.tilt_fwd
         x += v * math.cos(heading) * dt
         y += v * math.sin(heading) * dt
@@ -105,7 +114,8 @@ def main():
     }
     for name, gate in cases.items():
         best, ok, track = fly(gate, cam=ELODIN_CAM, up_world=(0.0, 0.0, 1.0),
-                              yaw_sign=YAW_SIGN_FLU, enu=True)
+                              yaw_sign=YAW_SIGN_FLU, pitch_sign=PITCH_SIGN_FLU,
+                              enu=True)
         check(name, ok, f"closest approach {best:.2f} m")
         if not ok:
             print("           track:", track[::50][:8])
@@ -117,7 +127,8 @@ def main():
         "gate above":               (25.0, 0.0, -6.0),
     }.items():
         best, ok, _ = fly(gate, cam=AIGP_CAM, up_world=(0.0, 0.0, -1.0),
-                          yaw_sign=YAW_SIGN_FRD, enu=False)
+                          yaw_sign=YAW_SIGN_FRD, pitch_sign=PITCH_SIGN_FRD,
+                          enu=False)
         check(name, ok, f"closest approach {best:.2f} m")
 
     print()

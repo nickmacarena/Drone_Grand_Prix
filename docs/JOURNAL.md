@@ -219,6 +219,43 @@ bearing+servo code against a 20-line kinematic vehicle and proves the chain
 in milliseconds, in both frame conventions. 8/8 cases converge. Same leverage
 the synthetic IMU test gave Stage 1.
 
+### Stage 3a robustness — how good must the real detector be?
+Ran the stand-in detector degraded (`DETECTOR_NOISE_DEG=2 DETECTOR_DROP=0.3
+DETECTOR_HZ=10`) to derive a spec for Stage 3b BEFORE building it:
+
+| detector                          | gates |
+|-----------------------------------|-------|
+| perfect (30 Hz, no noise/drops)   | 6/6 in 53.60 s |
+| 2 deg noise, 30 % drop, 10 Hz     | 2/6 -> **3/6** after the fixes below |
+
+Not solved, but the failure mode changed from fatal to slow: it now
+reacquires gate 2 (t=46.4) instead of dying, and simply runs out of the 60 s
+window. Two things fixed along the way, both instructive:
+
+1. **The servo discarded its fix on every missed frame.** Added a target
+   tracker: EMA-smoothed bearing, and coast on the last good fix for `hold_s`
+   before declaring the gate lost. (Necessary but not sufficient.)
+2. **The search behaviour fought itself.** Stopping to "look around" LEVELS
+   the drone, and because the camera is body-mounted at +20 deg, levelling
+   shrinks the downward view from ~23 deg (pitched at cruise) to ~9 deg — the
+   search destroyed the very FOV it needed to find a gate below. Worse, the
+   descent I added had no floor: the drone rode it to z=0 and sat there
+   spinning. Search now keeps meaningful forward tilt (nose down = camera
+   down) and bounds the descent in time.
+
+**Transferable insight: on this airframe forward speed IS downward vision.**
+Same camera geometry in the official sim, so this applies there unchanged.
+
+Remaining robustness work (not started): faster reacquisition — a systematic
+sweep pattern rather than a fixed-direction yaw, and using `active_gate_index`
+transitions to predict roughly where the next gate should appear.
+
+**Methodology note.** The offline test initially FAILED this correct fix,
+because it flew level and never pitched — it could not represent the very
+coupling the fix relies on. A test that omits the mechanism you depend on
+will confidently mislead you. It now integrates a first-order pitch lag
+driven by the forward-tilt command; 8/8 cases pass.
+
 ### Vision deps on the Windows ARM VM: SOLVED (no opencv needed)
 PyPI 2026-07-26: **opencv-python has NO win_arm64 wheels at any version**
 (and no cp314 win_amd64) — but **Pillow ships cp314 win_arm64**, as does
