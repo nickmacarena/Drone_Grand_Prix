@@ -57,6 +57,29 @@ class RaceStatus:
 
 
 @dataclass(frozen=True)
+class ImuSample:
+    """HIGHRES_IMU. In VQ2 this is the ONLY state sensor: ATTITUDE,
+    LOCAL_POSITION_NED and ODOMETRY are all disabled."""
+    t_us: int
+    ax: float           # m/s^2, body FRD (specific force — includes gravity)
+    ay: float
+    az: float
+    gx: float           # rad/s, body FRD
+    gy: float
+    gz: float
+    # Optional extras. MAVLink defines them; whether the sim populates them is
+    # reported by `fields_updated` and is worth knowing: a live magnetometer
+    # would fix the estimator's unobservable yaw drift, and pressure_alt would
+    # give an absolute altitude reference we otherwise do not have.
+    mx: float = 0.0
+    my: float = 0.0
+    mz: float = 0.0
+    abs_pressure: float = 0.0
+    pressure_alt: float = 0.0
+    fields_updated: int = 0
+
+
+@dataclass(frozen=True)
 class HeartbeatStatus:
     """Latest HEARTBEAT from the sim. Tells us armed state and current mode."""
     armed: bool
@@ -72,4 +95,5 @@ class SharedState:
     track_data: Optional[TrackData] = None
     race_status: Optional[RaceStatus] = None
     heartbeat: Optional[HeartbeatStatus] = None
+    imu: Optional[ImuSample] = None
     latest_frame: Optional[object] = None  # numpy array, kept loosely typed

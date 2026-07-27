@@ -10,7 +10,15 @@ import time
 
 from pymavlink import mavutil
 
-from state import DroneState, Gate, HeartbeatStatus, RaceStatus, SharedState, TrackData
+from state import (
+    DroneState,
+    Gate,
+    HeartbeatStatus,
+    ImuSample,
+    RaceStatus,
+    SharedState,
+    TrackData,
+)
 
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
@@ -28,6 +36,7 @@ class MAVLinkRX:
         self._track_total: dict[int, int] = {}
 
         # Latest fields needed to build a DroneState (some come from different msgs)
+        self._imu_logged = False
         self._pos = None  # (n, e, d, vn, ve, vd)
         self._att = None  # (roll, pitch, yaw)
 
@@ -62,6 +71,8 @@ class MAVLinkRX:
             elif t == "DATA_TRANSMISSION_HANDSHAKE":
                 self._track_chunks[msg.width] = {}
                 self._track_total[msg.width] = msg.packets
+            elif t == "HIGHRES_IMU":
+                self._on_highres_imu(msg)
             elif t == "HEARTBEAT":
                 self._on_heartbeat(msg)
             elif t == "COMMAND_ACK":
@@ -136,6 +147,31 @@ class MAVLinkRX:
             gates.append(Gate(gid, nx, ny, nz, qw, qx, qy, qz, w, h))
             payload = payload[38:]
         self.shared.track_data = TrackData(gates=tuple(gates))
+
+    def _on_highres_imu(self, msg):
+        """The only state sensor VQ2 leaves us."""
+        self.shared.imu = ImuSample(
+            t_us=int(getattr(msg, "time_usec", 0)),
+            ax=float(msg.xacc), ay=float(msg.yacc), az=float(msg.zacc),
+            gx=float(msg.xgyro), gy=float(msg.ygyro), gz=float(msg.zgyro),
+            mx=float(getattr(msg, "xmag", 0.0)),
+            my=float(getattr(msg, "ymag", 0.0)),
+            mz=float(getattr(msg, "zmag", 0.0)),
+            abs_pressure=float(getattr(msg, "abs_pressure", 0.0)),
+            pressure_alt=float(getattr(msg, "pressure_alt", 0.0)),
+            fields_updated=int(getattr(msg, "fields_updated", 0)),
+        )
+        if not self._imu_logged:
+            self._imu_logged = True
+            s = self.shared.imu
+            # Which optional fields the sim actually populates decides whether
+            # we get a heading reference (mag -> fixes yaw drift) or an
+            # altitude reference (pressure_alt). Worth knowing on run one.
+            print(f"  [IMU] first sample: fields_updated={s.fields_updated:#x} "
+                  f"accel=({s.ax:+.2f},{s.ay:+.2f},{s.az:+.2f}) "
+                  f"gyro=({s.gx:+.3f},{s.gy:+.3f},{s.gz:+.3f}) "
+                  f"mag=({s.mx:+.2f},{s.my:+.2f},{s.mz:+.2f}) "
+                  f"pressure_alt={s.pressure_alt:.2f}", flush=True)
 
     def _on_heartbeat(self, msg):
         armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)

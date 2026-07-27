@@ -68,10 +68,20 @@ def send_position_ned(mavlink_conn, system_boot_ms, n, e, d):
     )
 
 
+# Sim rev 3390 (PyAIPilotExample-v4) added an extension bit to
+# SET_ATTITUDE_TARGET.type_mask: with it set, the sim interprets body_rates as
+# documented physical rad/s instead of the legacy scaling we reverse-engineered
+# over 16 VQ1 runs. The v4 example calls it "recommended for new integrations".
+ATTITUDE_TARGET_TYPEMASK_DCL_BODY_RATES_RADS = 16
+USE_RAD_PER_SEC_BODY_RATES = True
+
+
 def send_attitude_rates(mavlink_conn, system_boot_ms, roll_rate, pitch_rate, yaw_rate, thrust):
     """Send body rate + thrust attitude command. Ignores attitude quaternion."""
     now_ms = int(time.time() * 1000)
     mask = mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
+    if USE_RAD_PER_SEC_BODY_RATES:
+        mask |= ATTITUDE_TARGET_TYPEMASK_DCL_BODY_RATES_RADS
     mavlink_conn.mav.set_attitude_target_send(
         now_ms - system_boot_ms,
         mavlink_conn.target_system,
