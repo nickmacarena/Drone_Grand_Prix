@@ -62,6 +62,7 @@ def motor_commands(
     tilt_x: float,    # [-1, 1] desired tilt toward world +x
     tilt_y: float,    # [-1, 1] desired tilt toward world +y
     thrust_cmd: float,  # collective motor command [0, 1]
+    yaw_rate_cmd: float = 0.0,  # rad/s; 0 = hold heading (VQ1 behaviour)
 ) -> np.ndarray:
     """One control step → 4 motor commands in [0, 1], order [BR, FR, BL, FL]."""
     R = quat_to_rotmat(*quat_xyzw)
@@ -85,7 +86,7 @@ def motor_commands(
     torque = np.array([
         IXX * KP_RATE * (w_des[0] - w[0]),
         IYY * KP_RATE * (w_des[1] - w[1]),
-        IZZ * KD_YAW * (0.0 - w[2]),
+        IZZ * KD_YAW * (yaw_rate_cmd - w[2]),
     ])
 
     # Differential motor commands from torque demands
