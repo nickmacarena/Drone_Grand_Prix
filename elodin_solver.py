@@ -10,13 +10,26 @@ Run from the elodin repo root:
         elodin run sim/main.py        # or tools/run_elodin.sh <course>
 """
 
+import os
+
 import numpy as np
 
 from solver.api import RCCommand, SensorUpdate  # elodin repo package
 from sim.course import active_course            # elodin repo package
 
+import estimator
 from flight_stack import HOVER_CMD, motor_commands
 from planner import PlannerConfig, PlannerState, plan
+
+# Attitude source: "truth" uses Elodin's ground-truth quaternion (VQ1 mode);
+# "imu" closes the loop on the IMU estimator alone, which is all VQ2 gives us
+# (ATTITUDE telemetry is disabled there). Position/velocity still come from
+# truth in both modes — Stage 2 isolates the ATTITUDE variable only.
+ATT_SOURCE = os.environ.get("ATT_SOURCE", "truth").lower()
+
+# Elodin: FLU body, ENU world.
+_est_cfg = estimator.EstimatorConfig(up_world=(0.0, 0.0, 1.0))
+_est = estimator.EstimatorState()
 
 _COURSE, _SPAWN, _SIM_TIME = active_course()
 GATES = tuple(g.center for g in _COURSE)  # ENU (x, y, z-up) == planner frame
@@ -53,11 +66,18 @@ DIRECT_MOTORS = np.array([-1.0, -1.0, -1.0, -1.0])
 def reset_state() -> None:
     global _state
     _state = PlannerState()
+    estimator.reset(_est)
     DIRECT_MOTORS[:] = -1.0
 
 
 def autopilot(update: SensorUpdate) -> RCCommand:
     t = update.t
+
+    estimator.update(
+        _est, _est_cfg, t,
+        [float(v) for v in update.gyro],
+        [float(v) for v in update.accel],
+    )
 
     pos = (float(update.world_pos[4]), float(update.world_pos[5]), float(update.world_pos[6]))
     vel = (
@@ -79,7 +99,12 @@ def autopilot(update: SensorUpdate) -> RCCommand:
     thrust_cmd = HOVER_CMD + out.vertical * VERT_AUTH
     thrust_cmd = max(THRUST_MIN_CMD, min(THRUST_MAX_CMD, thrust_cmd))
 
-    quat = tuple(float(update.world_pos[i]) for i in range(4))
+    if ATT_SOURCE == "imu" and _est.initialized:
+        # estimator is [w, x, y, z]; flight_stack wants scalar-last.
+        qw, qx, qy, qz = _est.q
+        quat = (qx, qy, qz, qw)
+    else:
+        quat = tuple(float(update.world_pos[i]) for i in range(4))
     motors = motor_commands(
         quat,
         update.gyro,

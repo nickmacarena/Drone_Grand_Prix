@@ -89,6 +89,66 @@ Also added handlers for HEARTBEAT, COMMAND_ACK, STATUSTEXT for visibility into t
 
 ---
 
+## 2026-07-26 — VQ2 dropped: it deletes almost everything VQ1 stood on
+
+Sim v1.0.3391 + PyAIPilotExample-v4. Diffed v4 against v1; the example carries
+explicit "disabled" notices:
+
+- **LOCAL_POSITION_NED — disabled.** No position. The NED planner has nothing
+  to run on.
+- **ATTITUDE — disabled.** No roll/pitch/yaw. Our attitude P-loop and the
+  measured response matrix lose their feedback signal.
+- **ODOMETRY — disabled.**
+- **Track data — nulled.** Gate positions/orientations/dimensions gone.
+  `active_gate_index` still sequences, but never says WHERE the gate is.
+
+Surviving: HIGHRES_IMU (accel+gyro), the FPV camera (`vision_rx.py` is
+byte-identical to VQ1), RACE_STATUS, COLLISION, HEARTBEAT, TIMESYNC,
+ACTUATOR_OUTPUT_STATUS. All MAVLink plumbing, re-arm and race-start
+discipline carry over unchanged.
+
+**Gift in the v4 diff** (sim rev 3390): a type_mask extension bit
+`ATTITUDE_TARGET_TYPEMASK_DCL_BODY_RATES_RADS = 16` makes the sim interpret
+body rates as documented physical rad/s instead of the legacy scaling we
+reverse-engineered over 16 runs. "Recommended for new integrations" — opt in.
+
+So VQ2 is the vision problem the competition is named for: estimate your own
+pose and find gates from a camera + IMU, nothing else. Plan (staged, per the
+discipline that cracked VQ1): 1) IMU attitude estimator, 2) closed-loop
+stabilization on the estimate, 3) gate detection offline, 4) visual servoing,
+5) full course. Elodin first — its FPV camera matches the VADR intrinsics.
+
+### Stage 1 — IMU attitude estimator: PASS
+
+`estimator.py`, Mahony complementary filter + gyro-bias learning, pure Python
+(no numpy: the VM still can't build it for 3.14). Frame-parameterized via
+`up_world` so one filter serves Elodin (FLU/ENU) and AIGP (FRD/NED).
+
+`tests/test_estimator.py` — synthetic IMU forward model, no sim needed. It
+immediately caught a **correction sign error**: the intuitive `cross(est,
+meas)` is positive feedback and diverged to 180 deg. Rotating the BODY FRAME
+by +w moves a fixed world vector's body-frame representation the OTHER way,
+so the correct term is `cross(meas, est)`. Cases 1-2 had passed trivially
+because initialization sets attitude directly and never exercises the
+correction path — hardened with a mid-flight estimate corruption.
+
+Elodin validation (`elodin_estimator_check.py`, passive alongside the proven
+ground-truth solver, full VQ1-replica lap):
+- mean tilt error **3.5 deg**, under 1 deg in smooth flight; 11.8 deg peak
+  during the takeoff transient (thrust contaminates the accel reference).
+- yaw drift ~5 deg/min — slow, and unobservable in principle from gravity
+  alone. Fine by design: VQ2 control is visual servoing on body-relative
+  bearings, so absolute heading is never needed.
+
+### Known Stage-3 blocker: vision deps on the Windows ARM VM
+Checked PyPI 2026-07-26: numpy ships cp314 win_arm64 wheels (2.5.1), but
+**opencv-python has NO win_arm64 wheels at any version, and no cp314
+win_amd64 either**. Options: MSVC build tools + source build; an older x64
+Python under emulation (opencv ships win_amd64 for <=cp313); or hand-rolled
+detection on raw JPEG bytes without cv2. Needs solving before Stage 4.
+
+---
+
 ## 2026-06-12 — ★ VQ1 COMPLETE IN THE OFFICIAL SIMULATOR — 6/6 GATES ★
 
 Sixteen race attempts over two days, each fixing one measured problem. The
