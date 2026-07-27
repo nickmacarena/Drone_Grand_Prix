@@ -9,9 +9,12 @@ actually flies: keep the gate centred in the picture and drive forward.
     pitch   fixed cruise tilt, eased off when poorly lined up
     roll    held level; steering is done with yaw so the gate stays in frame
 
-`el_setpoint` is NOT zero. The camera is pitched 20 deg up, so driving the
-gate onto the optical axis would leave us flying 20 deg BELOW it forever.
-Centring on our own flight path means el -> -CAM_TILT_UP.
+Input angles are LEVEL-FRAME (bearing.stabilized_bearing), not raw camera
+angles. This is not cosmetic: raw elevation is contaminated by the drone's own
+nose-down cruise pitch, so servoing on it chases your own attitude — the first
+Stage 3a run climbed 5 m above gate 0, pushed it out of the vertical FOV, and
+searched forever. De-rotating by the IMU attitude estimate decouples them and
+makes el = 0 mean "gate at my altitude".
 
 No altitude sensor is needed anywhere here: "the gate looks too high" is
 itself the climb signal. When the gate is lost we cannot know which way is
@@ -23,7 +26,6 @@ import math
 from dataclasses import dataclass
 
 from attitude import clamp
-from bearing import CAM_TILT_UP_DEG, GateObservation
 
 
 @dataclass(frozen=True)
@@ -35,8 +37,9 @@ class ServoConfig:
     # Vertical: elevation error -> normalized vertical effort
     kp_el: float = 1.6
     max_vertical: float = 0.7
-    # Put the gate on our own flight path, not on the up-tilted optical axis.
-    el_setpoint_rad: float = -math.radians(CAM_TILT_UP_DEG)
+    # Angles are LEVEL-frame (see bearing.stabilized_bearing), so 0 means
+    # "gate at our own altitude" — no dependence on camera mounting tilt.
+    el_setpoint_rad: float = 0.0
 
     # Forward drive
     cruise_tilt: float = 0.55        # normalized forward tilt when lined up
@@ -47,7 +50,13 @@ class ServoConfig:
     min_confidence: float = 0.15
 
     # Behaviour when no gate is visible
-    search_yaw_rate: float = 0.7     # rad/s, toward where it was last seen
+    search_yaw_rate: float = 0.35    # rad/s, toward where it was last seen
+    # The camera is pitched 20 deg UP with a 58.7 deg vertical FOV, so nothing
+    # more than ~9 deg below the flight path is visible at all. A pure yaw
+    # sweep can therefore hunt forever past a gate that is simply below us
+    # (proved in tests/test_servo.py). Descending raises it into frame.
+    search_descend: float = 0.20     # vertical effort, downward
+    search_creep: float = 0.12       # keep inching forward while searching
     lost_coast_s: float = 0.4        # keep driving briefly (gate just left FOV
                                      # because we are about to fly through it)
 
@@ -61,6 +70,15 @@ class ServoState:
 
 
 @dataclass(frozen=True)
+class Target:
+    """A sighting, in the LEVEL frame. Whatever produces it — truth stand-in
+    or real image detector — the servo sees only this."""
+    az: float           # radians, + = right of our heading
+    el: float           # radians, + = above our altitude
+    confidence: float   # 0..1
+
+
+@dataclass(frozen=True)
 class ServoOutput:
     tilt_fwd: float      # body-forward tilt effort, [-1, 1]
     tilt_right: float    # body-right tilt effort, [-1, 1]
@@ -70,7 +88,7 @@ class ServoOutput:
 
 
 def step(state: ServoState, cfg: ServoConfig, t: float,
-         obs: GateObservation | None) -> ServoOutput:
+         obs: Target | None) -> ServoOutput:
     dt = 0.0 if state.last_t is None else max(0.0, t - state.last_t)
     state.last_t = t
 
@@ -115,9 +133,9 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
     state.searching = True
     direction = 1.0 if state.last_az >= 0.0 else -1.0
     return ServoOutput(
-        tilt_fwd=0.0,
+        tilt_fwd=cfg.search_creep,
         tilt_right=0.0,
-        vertical=0.0,
+        vertical=-cfg.search_descend,
         yaw_rate=direction * cfg.search_yaw_rate,
         have_target=False,
     )

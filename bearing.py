@@ -24,7 +24,14 @@ give HFoV = 90 and VFoV = 58.7; the intrinsics win — they are unambiguous.)
 import math
 from dataclasses import dataclass
 
-from attitude import quat_rotate_inv, vec_dot, vec_norm
+from attitude import (
+    quat_rotate,
+    quat_rotate_inv,
+    vec_cross,
+    vec_dot,
+    vec_norm,
+    vec_unit,
+)
 
 CAM_WIDTH = 640
 CAM_HEIGHT = 360
@@ -131,3 +138,51 @@ def observe_from_truth(cam: CameraModel, q_body_to_world, drone_pos, gate_pos,
         width_px=width_px,
         confidence=confidence,
     )
+
+
+def dir_body(cam: CameraModel, u: float, v: float):
+    """Unit vector toward an image point, in BODY coordinates.
+
+    Depends only on (u, v) and the camera model, so a real image detector
+    feeds this exactly like the truth stand-in does.
+    """
+    x = (u - cam.cx) / cam.fx
+    y = (v - cam.cy) / cam.fy
+    d = (cam.fwd[0] + x * cam.right[0] + y * cam.down[0],
+         cam.fwd[1] + x * cam.right[1] + y * cam.down[1],
+         cam.fwd[2] + x * cam.right[2] + y * cam.down[2])
+    return vec_unit(d)
+
+
+def stabilized_bearing(cam: CameraModel, obs: GateObservation,
+                       q_body_to_world, up_world):
+    """Bearing de-rotated into a LEVEL frame: (az_right, el_up), radians.
+
+    Raw camera az/el are contaminated by the drone's own attitude — a nose-down
+    cruise pitch makes a level gate look high, so servoing straight off `el`
+    chases your own pitch and climbs away from the gate (observed Stage 3a run
+    1: climbed 5 m above gate 0, lost it out of the vertical FOV, never
+    recovered). De-rotating with the attitude estimate removes that coupling.
+
+    el_up is 0 when the gate is at our own altitude — a physically meaningful
+    setpoint that owes nothing to the camera's mounting tilt.
+    az_right is measured from our current heading, positive to the right.
+    """
+    d_world = quat_rotate(q_body_to_world, dir_body(cam, obs.u, obs.v))
+
+    el_up = math.asin(max(-1.0, min(1.0, vec_dot(d_world, up_world))))
+
+    # Horizontal projections of heading and of the gate direction.
+    fwd_world = quat_rotate(q_body_to_world, (1.0, 0.0, 0.0))
+    h = vec_unit(_horizontal(fwd_world, up_world))
+    g = vec_unit(_horizontal(d_world, up_world))
+    if vec_norm(h) < 1e-6 or vec_norm(g) < 1e-6:
+        return 0.0, el_up
+    az_right = -math.atan2(vec_dot(up_world, vec_cross(h, g)), vec_dot(h, g))
+    return az_right, el_up
+
+
+def _horizontal(v, up_world):
+    """Component of v perpendicular to up_world."""
+    k = vec_dot(v, up_world)
+    return (v[0] - k * up_world[0], v[1] - k * up_world[1], v[2] - k * up_world[2])

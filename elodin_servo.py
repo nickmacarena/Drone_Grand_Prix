@@ -30,7 +30,7 @@ from sim.course import active_course            # elodin repo package
 import estimator
 import servo
 from attitude import quat_rotate
-from bearing import ELODIN_CAM, observe_from_truth
+from bearing import ELODIN_CAM, observe_from_truth, stabilized_bearing
 from flight_stack import HOVER_CMD, motor_commands
 
 _COURSE, _SPAWN, _SIM_TIME = active_course()
@@ -39,6 +39,13 @@ T_LAND_END = _SIM_TIME - 1.0
 
 VERT_AUTH = 0.15
 THRUST_MIN_CMD, THRUST_MAX_CMD = 0.02, 0.95
+
+# The servo says "turn right"; the flight stack wants a BODY-Z rate. Elodin is
+# FLU, where +z is UP, so a positive body-z rate turns LEFT — the command must
+# be negated. (FRD/NED, i.e. the official sim, needs +1.) Getting this wrong
+# steers away from the gate and the drone hunts forever; validated in
+# tests/test_servo.py.
+YAW_SIGN = -1.0
 
 # Detector realism knobs (defaults = perfect detector).
 NOISE_DEG = float(os.environ.get("DETECTOR_NOISE_DEG", "0"))
@@ -113,7 +120,15 @@ def autopilot(update: SensorUpdate) -> RCCommand:
             _log["seen"] += 1
     obs = _last_obs[0]
 
-    out = servo.step(_servo_state, _servo_cfg, t, obs)
+    # Raw camera angles -> level frame, de-rotated by the IMU attitude
+    # estimate. A real detector produces the same (u, v) so this is unchanged
+    # when vision replaces the stand-in.
+    target = None
+    if obs is not None:
+        az_l, el_l = stabilized_bearing(ELODIN_CAM, obs, _est.q, (0.0, 0.0, 1.0))
+        target = servo.Target(az=az_l, el=el_l, confidence=obs.confidence)
+
+    out = servo.step(_servo_state, _servo_cfg, t, target)
 
     # ── Body-relative steering -> world tilt, using the ESTIMATED heading.
     # Both this and motor_commands() use the same estimate, so the estimator's
@@ -135,16 +150,16 @@ def autopilot(update: SensorUpdate) -> RCCommand:
 
     DIRECT_MOTORS[:] = motor_commands(
         (qx, qy, qz, qw), update.gyro, tilt_x, tilt_y, thrust,
-        yaw_rate_cmd=out.yaw_rate,
+        yaw_rate_cmd=YAW_SIGN * out.yaw_rate,
     )
 
     if t >= _log["next"]:
         _log["next"] += 2.0
         pos = (float(update.world_pos[4]), float(update.world_pos[5]),
                float(update.world_pos[6]))
-        if obs is not None:
-            det = (f"az={math.degrees(obs.az):+6.1f} el={math.degrees(obs.el):+6.1f} "
-                   f"rng={obs.range_m:5.1f} conf={obs.confidence:.2f}")
+        if target is not None:
+            det = (f"az={math.degrees(target.az):+6.1f} el={math.degrees(target.el):+6.1f} "
+                   f"rng={obs.range_m:5.1f} conf={target.confidence:.2f}")
         else:
             det = f"NO GATE ({_servo_state.time_since_seen:.1f}s)"
         print(f"  [SERVO] t={t:5.1f} gate={update.next_gate_index} "
