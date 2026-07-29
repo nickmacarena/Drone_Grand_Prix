@@ -384,7 +384,9 @@ class ControllerVQ2:
         obs = self._last_obs
         if obs is not None:
             az, el = stabilized_bearing(self.cam, obs, self.est.q, self.up_world)
-            target = servo.Target(az=az, el=el, confidence=obs.confidence)
+            target = servo.Target(az=az, el=el,
+                                 confidence=obs.confidence,
+                                 range_m=obs.range_m)
         out = servo.step(self.servo_state, self.servo_cfg, t, target)
         if not out.have_target:
             return 0.0, 0.0, 0.0, self.hover

@@ -131,12 +131,68 @@ def main():
                           enu=False)
         check(name, ok, f"closest approach {best:.2f} m")
 
+    print("\n[track continuity — official run 6 regression]")
+    test_run6_impostor_rejection()
+    test_acquire_needs_confidence()
+
     print()
     if _fails:
         print(f"RESULT: FAIL — {len(_fails)}: {', '.join(_fails)}")
         return 1
     print("RESULT: PASS — servo converges onto the gate in both frames")
     return 0
+
+
+def test_run6_impostor_rejection():
+    """Official run 6: the servo span up because it chased impostor blobs.
+
+    The three sightings below are the real ones from vq2_race5.log. No single
+    gate can be 4.3 m away, then 1.0 m, then 12.6 m, while jumping from u=331
+    to u=621 px. The servo must hold its track through them instead of
+    saturating yaw toward the last one.
+    """
+    cfg = servo.ServoConfig()
+    st = servo.ServoState()
+
+    def az_of(u):
+        return math.atan2((u - 320.0) / 320.0, 1.0)
+
+    # Establish a track on a good, confident sighting.
+    servo.step(st, cfg, 0.0, servo.Target(az=az_of(323.1), el=0.0,
+                                          confidence=1.0, range_m=5.8))
+    check("track acquired", st.have_fix)
+
+    # Consistent follow-up: accepted.
+    servo.step(st, cfg, 0.1, servo.Target(az=az_of(331.2), el=0.0,
+                                          confidence=1.0, range_m=4.3))
+    check("consistent sighting accepted", st.rejected == 0)
+
+    # Impostor 1: range collapses to 1.0 m (a 480 px blob) in 0.1 s.
+    servo.step(st, cfg, 0.2, servo.Target(az=az_of(403.5), el=0.0,
+                                          confidence=1.0, range_m=1.0))
+    # Impostor 2: teleports to the frame edge and back out to 12.6 m.
+    out = servo.step(st, cfg, 0.3, servo.Target(az=az_of(621.3), el=0.0,
+                                                confidence=0.44, range_m=12.6))
+    check("impostors rejected", st.rejected >= 1, f"rejected={st.rejected}")
+    check("yaw not saturated by impostor",
+          abs(out.yaw_rate) < 0.9 * cfg.max_yaw_rate,
+          f"yaw_rate={out.yaw_rate:.2f} (max {cfg.max_yaw_rate})")
+    check("track survived", out.have_target)
+
+
+def test_acquire_needs_confidence():
+    """A marginal blob may sustain a track but must not start one."""
+    cfg = servo.ServoConfig()
+    st = servo.ServoState()
+    servo.step(st, cfg, 0.0, servo.Target(az=0.0, el=0.0, confidence=0.30,
+                                          range_m=8.0))
+    check("weak sighting does not acquire", not st.have_fix)
+    servo.step(st, cfg, 0.1, servo.Target(az=0.0, el=0.0, confidence=0.90,
+                                          range_m=8.0))
+    check("strong sighting acquires", st.have_fix)
+    servo.step(st, cfg, 0.2, servo.Target(az=0.02, el=0.0, confidence=0.30,
+                                          range_m=8.2))
+    check("weak sighting sustains existing track", st.time_since_seen == 0.0)
 
 
 if __name__ == "__main__":

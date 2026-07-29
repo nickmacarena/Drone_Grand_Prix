@@ -48,6 +48,29 @@ class ServoConfig:
 
     # Confidence gating: a low-confidence detection still steers, but gently.
     min_confidence: float = 0.15
+    # ACQUIRING a track is a stronger claim than maintaining one, so it needs
+    # more evidence. A marginal blob may keep an established track alive; it
+    # may not start one.
+    acquire_confidence: float = 0.55
+
+    # ── Track continuity ────────────────────────────────────────────────
+    # The detector reports the best orange blob in EACH FRAME independently,
+    # with no memory. Official run 6 showed what that costs: three consecutive
+    # sightings read rng 4.3 -> 1.0 -> 12.6 m and u 331 -> 403 -> 621 px. No
+    # gate moves like that; those were different objects. The servo chased the
+    # last one to the frame edge at a saturated 92 deg/s, lost it, and span.
+    #
+    # A gate is a physical object, so its bearing and range must evolve
+    # continuously. Sightings that violate that are rejected as mistaken
+    # identity. Bounds are generous — this rejects the impossible, not the
+    # merely surprising.
+    max_az_step_rad: float = 0.20    # instantaneous slack (detector jitter)
+    max_az_rate: float = 2.5         # rad/s of plausible bearing change
+    max_closing_speed: float = 20.0  # m/s of plausible range change
+    range_slack_m: float = 1.5       # plus fixed slack (width estimate is coarse)
+    # If the track keeps rejecting everything, the track itself is probably
+    # wrong — drop it and re-acquire rather than stay blind forever.
+    reject_timeout_s: float = 0.7
 
     # Target tracking. A real detector is noisy, drops frames and runs slower
     # than the control loop; without these the servo threw away its fix on
@@ -87,6 +110,10 @@ class ServoState:
     az_f: float = 0.0                # smoothed bearing (the working estimate)
     el_f: float = 0.0
     have_fix: bool = False
+    rng_f: float | None = None       # smoothed range, for continuity gating
+    t_last_accept: float | None = None
+    rejecting_since: float | None = None
+    rejected: int = 0                # diagnostic: how many sightings refused
 
 
 @dataclass(frozen=True)
@@ -96,6 +123,8 @@ class Target:
     az: float           # radians, + = right of our heading
     el: float           # radians, + = above our altitude
     confidence: float   # 0..1
+    range_m: float | None = None   # from apparent width; None disables the
+                                   # range half of the continuity gate
 
 
 @dataclass(frozen=True)
@@ -107,18 +136,61 @@ class ServoOutput:
     have_target: bool
 
 
+def _continuous(state: ServoState, cfg: ServoConfig, t: float,
+                obs: "Target") -> bool:
+    """Could this sighting be the same physical gate as the current track?
+
+    Rejects mistaken identity, not honest noise: the bounds allow a fast gate
+    crossing the frame and a fast closure, and only refuse motion no rigid
+    object could produce in the elapsed time.
+    """
+    gap = 0.0 if state.t_last_accept is None else max(0.0, t - state.t_last_accept)
+
+    if abs(obs.az - state.az_f) > cfg.max_az_step_rad + cfg.max_az_rate * gap:
+        return False
+
+    if (state.rng_f is not None and obs.range_m is not None
+            and math.isfinite(obs.range_m)):
+        if abs(obs.range_m - state.rng_f) > (cfg.range_slack_m
+                                             + cfg.max_closing_speed * gap):
+            return False
+    return True
+
+
 def step(state: ServoState, cfg: ServoConfig, t: float,
          obs: Target | None) -> ServoOutput:
     dt = 0.0 if state.last_t is None else max(0.0, t - state.last_t)
     state.last_t = t
 
     usable = obs is not None and obs.confidence >= cfg.min_confidence
+    if usable and not state.have_fix:
+        # No track yet: acquiring needs stronger evidence than maintaining.
+        usable = obs.confidence >= cfg.acquire_confidence
+    if usable and state.have_fix and not _continuous(state, cfg, t, obs):
+        # Sighting is inconsistent with the track: almost certainly a
+        # different object. Coast on the track instead of jumping to it.
+        usable = False
+        state.rejected += 1
+        if state.rejecting_since is None:
+            state.rejecting_since = t
+        elif t - state.rejecting_since > cfg.reject_timeout_s:
+            state.have_fix = False       # the track was the wrong one
+            state.rng_f = None
+            state.rejecting_since = None
+    elif usable:
+        state.rejecting_since = None
+
     if usable:
         # Blend into the running estimate rather than trusting one frame.
         a = cfg.ema_alpha if state.have_fix else 1.0
         state.az_f += a * (obs.az - state.az_f)
         state.el_f += a * (obs.el - state.el_f)
+        if obs.range_m is not None and math.isfinite(obs.range_m):
+            r = obs.range_m
+            state.rng_f = r if state.rng_f is None else (
+                state.rng_f + cfg.ema_alpha * (r - state.rng_f))
         state.have_fix = True
+        state.t_last_accept = t
         state.last_az = state.az_f
         state.time_since_seen = 0.0
         state.searching = False

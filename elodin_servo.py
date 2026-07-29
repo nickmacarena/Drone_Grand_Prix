@@ -126,7 +126,9 @@ def autopilot(update: SensorUpdate) -> RCCommand:
     target = None
     if obs is not None:
         az_l, el_l = stabilized_bearing(ELODIN_CAM, obs, _est.q, (0.0, 0.0, 1.0))
-        target = servo.Target(az=az_l, el=el_l, confidence=obs.confidence)
+        target = servo.Target(az=az_l, el=el_l,
+                              confidence=obs.confidence,
+                              range_m=obs.range_m)
 
     out = servo.step(_servo_state, _servo_cfg, t, target)
 

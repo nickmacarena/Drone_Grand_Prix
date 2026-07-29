@@ -506,3 +506,44 @@ Decision: single P controller is fragile and won't compete. Build a proper casca
 - Plan: `system_id.py` measures hover thrust + attitude response → `measurements.py` constants → `pid.py` cascaded loops use measured values
 - VQ1 strategy: identify, implement, fly through 6 gates in completion-grade time. Aim for 5–7 sim runs total, not 20+ from hand-tuning.
 - VQ2 prep: read up on MPC + differential flatness for quadrotors (Foehn/Scaramuzza). Not implementing yet.
+
+## VQ2 official run 6 — first flight under closed-loop vision, and the impostor spin
+
+Removing in-race calibration worked: the drone flew at the gun and detected
+gate 0 immediately. First time the built stack has actually flown as a whole.
+
+It then span up and crashed. The mechanism, straight from the log:
+
+    DET u=323.1 rng= 5.8 conf=1.00   yaw=  +0.1   <- gate dead centre
+    DET u=331.2 rng= 4.3 conf=1.00   yaw=  +1.6
+    DET u=403.5 rng= 1.0 conf=1.00   yaw= +11.1   <- 480 px blob
+    DET u=621.3 rng=12.6 conf=0.44   yaw= +68.9   <- teleported to the edge
+    no-gate                          yaw=+130.1
+
+az at u=621 is 43 deg; kp_yaw 2.0 saturates max_yaw_rate 1.6 rad/s = 92 deg/s,
+which is exactly the observed 46 deg per half-second. The servo obeyed. The
+sightings were wrong: no gate goes 4.3 -> 1.0 -> 12.6 m while jumping 290 px.
+
+The detector reports the best orange blob in EACH FRAME with no memory, so
+"the gate" can be a different object every frame. This was invisible until now
+because Stage 3a validated the servo on synthetic bearings, which are
+continuous by construction, and Elodin's dead render bridge means no image can
+ever reach the servo there. The bearing transform was NOT at fault — h and g
+both come from the same quaternion, so the unobservable yaw cancels exactly in
+the angle between them (verified by hand in both NED and ENU).
+
+Fix: track continuity gating in servo.step(). Acquiring a track needs
+confidence >= 0.55; maintaining one needs only 0.15. Once a track exists, a
+sighting is rejected as mistaken identity if its bearing or range could not
+have evolved from the track in the elapsed time (2.5 rad/s, 20 m/s, plus fixed
+slack). Rejecting continuously for 0.7 s drops the track — a wrong track must
+not lock out a real gate forever.
+
+Regression test replays the four real sightings above: yaw command falls from
+saturated 1.6 rad/s to 0.04. All eight original convergence cases still pass,
+so the gate rejects the impossible without refusing honest tracking.
+
+Open: the impostors themselves are unexplained. 47 frames were saved to
+vq2_frames6 — replaying the detector over them offline will show what it
+actually latched onto, which is the difference between mitigating this and
+fixing it.
