@@ -547,3 +547,65 @@ Open: the impostors themselves are unexplained. 47 frames were saved to
 vq2_frames6 — replaying the detector over them offline will show what it
 actually latched onto, which is the difference between mitigating this and
 fixing it.
+
+## VQ2 official run 6 — the real cause: no vertical rate feedback
+
+Frames from run 6 (47 JPEGs + IMU sidecar) were replayed offline. That
+overturned the run-5 diagnosis. The yaw runaway is a SYMPTOM, not the cause.
+
+What the frames show, in order:
+  frame  9  gate 0 centred, u=323, w= 84 px
+  frame 11  closing,        u=333, w=118 px
+  frame 12  closing,        u=349, w=197 px
+  frame 13  the gate's TOP BANNER fills the bottom of the view
+
+Frame 13 is the drone above the top bar looking down at it. It clipped the top
+of gate 0. Frames 14+ are a tumble (inverted "Station" text, floor overhead),
+and every wild yaw excursion in the log happens after that impact. Bearing
+tracking up to frame 13 was good: u went 323 -> 333 -> 349, nicely centred.
+
+So the aircraft flies HIGH — which is exactly what runs 1 and 2 showed ("flew
+slightly above and past the first gate", twice). That was the signal all along.
+
+The elevation math is NOT wrong. Hand-computing stabilized_bearing for frame 9
+(u=323, v=152, pitch -10.9 deg) gives el_up = +14.1 deg -> vertical = 0.394 ->
+thrust = hover * (1 + 0.8 * 0.394) = 0.326, matching the logged thr=0.32. Gate
+0 really does sit ~2.4 m above the start pad, so climbing was correct.
+
+The bug is that nothing stopped the climb. Fixing the earlier descent bug meant
+setting VZ_DAMP_AFTER_SETTLE = False, because vz_est is unobservable in steady
+flight (constant velocity => zero net accel => reads exactly 1 g). Correct fix,
+but it left a PURE PROPORTIONAL controller driving a second-order plant, which
+must overshoot.
+
+The damping signal we were missing is observable and was sitting in front of
+us: d(elevation bearing)/dt. It comes from DIFFERENTIATING VISION, not from
+integrating accelerometers, so none of the vz_est unobservability applies.
+
+Gains chosen against a model, not by sim trial-and-error. Worst-case vertical
+miss at the gate plane, swept over gate offsets -2..+3.5 m and closing speeds
+4..9 m/s:
+    kp_el 1.6, kd_el 0.0  (what we flew)  1.65 m   <- hits the top bar
+    kp_el 1.6, kd_el 1.3                  0.51 m
+    kp_el 0.8, kd_el 1.3  (adopted)       0.37 m   <- 2x margin in a 0.75 m half-opening
+
+Two permanent additions, both aimed at the fact that the kinematic servo test
+commands velocity directly and therefore CANNOT exhibit overshoot — it passed
+happily through all of this:
+  * tests/test_servo.py::test_vertical_overshoot integrates the real plant
+    (thrust -> accel -> velocity -> altitude) and asserts the miss fits the
+    opening. It also asserts a P-only loop FAILS it (1.85 m), so the test has
+    teeth.
+  * tools/replay_frames.py re-flies captured frames through detector+servo
+    offline. It found this in one pass instead of a five-minute sim cycle.
+
+Also tightened the continuity gate from run 5: max_az_rate was 2.5 rad/s,
+LOOSER than the 1.6 rad/s the aircraft can even yaw, so it could only reject
+the physically absurd. Now 1.8 rad/s / 0.12 rad step / 12 m/s closing. On run
+6's frames the gate now accepts frames 0-13 and rejects the frame-14 impostor.
+
+Known bias, not yet fixed: range is computed from the detected OUTER frame
+width but divided by the 1.5 m INNER opening, so it underestimates by roughly
+the frame-to-opening ratio (~1.6x). Stationary on the pad it reports 5.7 m.
+Control never uses range — only the continuity gate and logging do, both in
+consistent units — so this is cosmetic for now.

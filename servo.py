@@ -32,10 +32,20 @@ from attitude import clamp
 class ServoConfig:
     # Horizontal: bearing -> yaw rate (rad/s per rad of azimuth error)
     kp_yaw: float = 2.0
+    kd_yaw: float = 0.30      # same idea, applied to the azimuth bearing
     max_yaw_rate: float = 1.6
 
-    # Vertical: elevation error -> normalized vertical effort
-    kp_el: float = 1.6
+    # Vertical: elevation error -> normalized vertical effort.
+    # kd_el damps using the MEASURED rate of change of the elevation bearing.
+    # This is the one rate signal VQ2 actually gives us: it comes from
+    # differentiating vision, not from integrating accelerometers, so the
+    # unobservability that makes vz_est useless in steady flight (constant
+    # velocity => zero net accel => indistinguishable from hover) does not
+    # apply. Without it the vertical loop is pure proportional on a
+    # second-order plant and MUST overshoot — official run 6 climbed to gate
+    # 0's centre, sailed past it, and clipped the top bar.
+    kp_el: float = 0.8
+    kd_el: float = 1.3
     max_vertical: float = 0.7
     # Angles are LEVEL-frame (see bearing.stabilized_bearing), so 0 means
     # "gate at our own altitude" — no dependence on camera mounting tilt.
@@ -64,13 +74,18 @@ class ServoConfig:
     # continuously. Sightings that violate that are rejected as mistaken
     # identity. Bounds are generous — this rejects the impossible, not the
     # merely surprising.
-    max_az_step_rad: float = 0.20    # instantaneous slack (detector jitter)
-    max_az_rate: float = 2.5         # rad/s of plausible bearing change
-    max_closing_speed: float = 20.0  # m/s of plausible range change
-    range_slack_m: float = 1.5       # plus fixed slack (width estimate is coarse)
+    # Bounds must be TIGHTER than the drone's own achievable motion or they
+    # reject nothing useful. Run 6's u=532/rng=16.6 sighting passed the first
+    # attempt at this gate because max_az_rate was 2.5 rad/s — larger than the
+    # 1.6 rad/s the aircraft can even yaw.
+    max_az_step_rad: float = 0.12    # instantaneous slack (detector jitter)
+    max_az_rate: float = 1.8         # rad/s of plausible bearing change
+    max_closing_speed: float = 12.0  # m/s of plausible range change
+    range_slack_m: float = 1.0       # plus fixed slack (width estimate is coarse)
     # If the track keeps rejecting everything, the track itself is probably
     # wrong — drop it and re-acquire rather than stay blind forever.
     reject_timeout_s: float = 0.7
+    rate_alpha: float = 0.4          # smoothing on the differentiated bearings
 
     # Target tracking. A real detector is noisy, drops frames and runs slower
     # than the control loop; without these the servo threw away its fix on
@@ -110,6 +125,8 @@ class ServoState:
     az_f: float = 0.0                # smoothed bearing (the working estimate)
     el_f: float = 0.0
     have_fix: bool = False
+    az_rate: float = 0.0             # d(az)/dt, smoothed — the damping signal
+    el_rate: float = 0.0
     rng_f: float | None = None       # smoothed range, for continuity gating
     t_last_accept: float | None = None
     rejecting_since: float | None = None
@@ -183,8 +200,16 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
     if usable:
         # Blend into the running estimate rather than trusting one frame.
         a = cfg.ema_alpha if state.have_fix else 1.0
+        az_prev, el_prev = state.az_f, state.el_f
         state.az_f += a * (obs.az - state.az_f)
         state.el_f += a * (obs.el - state.el_f)
+        # Bearing rates, from the vision stream itself. Smoothed, because
+        # differentiating a noisy signal amplifies the noise.
+        gap = None if state.t_last_accept is None else t - state.t_last_accept
+        if gap and gap > 1e-3:
+            b = cfg.rate_alpha
+            state.az_rate += b * ((state.az_f - az_prev) / gap - state.az_rate)
+            state.el_rate += b * ((state.el_f - el_prev) / gap - state.el_rate)
         if obs.range_m is not None and math.isfinite(obs.range_m):
             r = obs.range_m
             state.rng_f = r if state.rng_f is None else (
@@ -204,10 +229,12 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
     # than the control loop) detector survivable.
     if state.have_fix and state.time_since_seen <= cfg.hold_s:
         stale = not usable
-        yaw_rate = clamp(cfg.kp_yaw * state.az_f, -cfg.max_yaw_rate, cfg.max_yaw_rate)
+        yaw_rate = clamp(cfg.kp_yaw * state.az_f + cfg.kd_yaw * state.az_rate,
+                         -cfg.max_yaw_rate, cfg.max_yaw_rate)
 
         el_err = state.el_f - cfg.el_setpoint_rad
-        vertical = clamp(cfg.kp_el * el_err, -cfg.max_vertical, cfg.max_vertical)
+        vertical = clamp(cfg.kp_el * el_err + cfg.kd_el * state.el_rate,
+                         -cfg.max_vertical, cfg.max_vertical)
 
         # Ease off forward drive when poorly lined up, so we turn onto the
         # gate rather than charging past its edge.
@@ -228,6 +255,8 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
     # ── Properly lost: hold level, stop climbing, sweep toward last sight ──
     state.searching = True
     state.have_fix = False
+    state.az_rate = 0.0
+    state.el_rate = 0.0
     direction = 1.0 if state.last_az >= 0.0 else -1.0
     descending = state.time_since_seen <= cfg.hold_s + cfg.search_descend_s
     return ServoOutput(

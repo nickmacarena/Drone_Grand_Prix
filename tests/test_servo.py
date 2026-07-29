@@ -131,6 +131,9 @@ def main():
                           enu=False)
         check(name, ok, f"closest approach {best:.2f} m")
 
+    print("\n[vertical dynamics — official run 6 regression]")
+    test_vertical_overshoot()
+
     print("\n[track continuity — official run 6 regression]")
     test_run6_impostor_rejection()
     test_acquire_needs_confidence()
@@ -193,6 +196,55 @@ def test_acquire_needs_confidence():
     servo.step(st, cfg, 0.2, servo.Target(az=0.02, el=0.0, confidence=0.30,
                                           range_m=8.2))
     check("weak sighting sustains existing track", st.time_since_seen == 0.0)
+
+
+def test_vertical_overshoot():
+    """Arrive INSIDE the gate opening, not above it (official run 6).
+
+    The convergence tests above are kinematic — they command velocity directly,
+    so they can never exhibit overshoot, and they passed happily while the real
+    aircraft climbed through gate 0's centre and clipped its top bar. This
+    integrates the actual plant (thrust -> accel -> velocity -> altitude), so
+    a P-only vertical loop fails it.
+
+    Hard limit: the gate's inner opening is 1.5 m, so the vertical miss at the
+    gate plane must stay well inside +/- 0.75 m.
+    """
+    G = 9.81
+    VERT_AUTH_FRAC = 0.8          # must match controller_vq2
+    HALF_OPENING = 0.75
+
+    def approach(gate_up, closing, cfg):
+        st = servo.ServoState()
+        z = vz = t = 0.0
+        dist = closing * 3.0
+        while t < 8.0 and dist > 0.0:
+            el = math.atan2(gate_up - z, max(dist, 0.05))
+            obs = (servo.Target(az=0.0, el=el, confidence=1.0,
+                                range_m=math.hypot(dist, gate_up - z))
+                   if int(t / 0.02) % 3 == 0 else None)   # detector ~15 Hz
+            out = servo.step(st, cfg, t, obs)
+            vz += G * VERT_AUTH_FRAC * out.vertical * 0.02
+            z += vz * 0.02
+            dist -= closing * 0.02
+            t += 0.02
+        return z - gate_up
+
+    cfg = servo.ServoConfig()
+    worst = 0.0
+    for gate_up in (-2.0, -1.0, 0.0, 1.2, 2.4, 3.5):
+        for closing in (4.0, 6.0, 9.0):
+            worst = max(worst, abs(approach(gate_up, closing, cfg)))
+    check("vertical miss fits the gate opening", worst < 0.5 * HALF_OPENING,
+          f"worst miss {worst:.2f} m (half-opening {HALF_OPENING} m)")
+
+    # And prove the test has teeth: with the damping removed it must FAIL.
+    from dataclasses import replace
+    undamped = replace(cfg, kd_el=0.0)
+    worst_p_only = max(abs(approach(u, c, undamped))
+                       for u in (2.4, 3.5) for c in (6.0, 9.0))
+    check("test detects a P-only loop", worst_p_only > HALF_OPENING,
+          f"P-only misses by {worst_p_only:.2f} m — would hit the top bar")
 
 
 if __name__ == "__main__":
