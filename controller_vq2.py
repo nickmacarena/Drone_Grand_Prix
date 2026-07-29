@@ -28,7 +28,8 @@ import os
 import time
 
 from attitude import quat_rotate
-from bearing import AIGP_CAM
+from bearing import AIGP_CAM, stabilized_bearing
+from detector import detect_gate
 from mavlink_tx import send_arm, send_attitude_rates
 from state import SharedState
 
@@ -99,6 +100,9 @@ class ControllerVQ2:
         self._last_arm_t = 0.0
         self._last_log_t = 0.0
         self._hold_yaw = None
+        self._last_frame_seen = None
+        self._last_obs = None
+        self._detect_err_logged = False
 
     # ── main loop ────────────────────────────────────────────────────
     def arm(self):
@@ -228,10 +232,24 @@ class ControllerVQ2:
         return -(a_world[2])                                  # up-positive
 
     def _race_step(self, t):
-        """Full visual servoing. Needs a detector to fill shared.latest_frame
-        with a gate sighting — Stage 3b. Until then, hold level rather than
-        fly blind."""
-        target = None   # TODO(Stage 3b): detector -> bearing -> Target
+        """Full visual servoing: detect the gate, de-rotate the sighting into
+        the level frame with the IMU attitude, servo onto it."""
+        target = None
+        frame = self.shared.latest_frame
+        if frame is not None and frame is not self._last_frame_seen:
+            self._last_frame_seen = frame
+            try:
+                obs = detect_gate(frame, AIGP_CAM)
+            except Exception as e:                    # never let vision kill the loop
+                obs = None
+                if not self._detect_err_logged:
+                    self._detect_err_logged = True
+                    print(f"  [DETECT] error: {e}", flush=True)
+            self._last_obs = obs
+        obs = self._last_obs
+        if obs is not None:
+            az, el = stabilized_bearing(AIGP_CAM, obs, self.est.q, UP_NED)
+            target = servo.Target(az=az, el=el, confidence=obs.confidence)
         out = servo.step(self.servo_state, self.servo_cfg, t, target)
         if not out.have_target:
             return 0.0, 0.0, 0.0, self.hover
@@ -261,10 +279,13 @@ class ControllerVQ2:
         hov = f"{self.hover:.3f}" if self.hover else "uncal"
         a_up = self._vertical_accel(imu) if (imu and self.est.initialized) else 0.0
         frames = self.shared.latest_frame is not None
+        o = self._last_obs
+        det = (f"DET u={o.u:5.1f} v={o.v:5.1f} rng={o.range_m:5.1f} conf={o.confidence:.2f}"
+               if o is not None else "no-gate")
         print(f"  [VQ2] {MISSION} {att} a_up={a_up:+5.2f} thr={thrust:.2f} "
               f"hov={hov} armed={hb.armed if hb else '?'} "
               f"gate={rs.active_gate_index if rs else '?'} "
-              f"started={rs.race_started if rs else '?'} frame={frames}",
+              f"started={rs.race_started if rs else '?'} frame={frames} {det}",
               flush=True)
 
 
