@@ -55,6 +55,17 @@ CAL_SKIP_S = 0.3          # ignore spool-up
 HOVER_MIN, HOVER_MAX = 0.10, 0.80
 SETTLE_S = 2.0            # let the calibration climb bleed off
 
+# ── Body-rate sign detection ─────────────────────────────────────────
+# VQ1 measured this sim's rate conventions as [roll +1, pitch -1, yaw -1] and
+# re-derived them every run. The rev-3390 rad/s type_mask bit does NOT
+# normalise them: assuming it did put the pitch loop in positive feedback and
+# the drone tumbled seconds after the attitude loop engaged (run 1, 2026-07-27
+# attitude went -17.8 -> +73.5 -> -137.8). Detect, never assume. The estimator
+# is the observer now, since ATTITUDE telemetry is gone.
+SIGN_PULSE_RATE = 0.6     # rad/s
+SIGN_PULSE_S = 0.4
+SIGN_MIN_DELTA_RAD = 0.02
+
 # ── Attitude control (same shape as the VQ1 stack, IMU-driven) ───────
 ATT_P = 5.0               # rad/s of body rate per rad of attitude error
 MAX_RATE = 3.0
@@ -75,6 +86,12 @@ class ControllerVQ2:
         self.servo_cfg = servo.ServoConfig()
 
         self.hover = None
+        self.rate_sign = [1.0, 1.0, 1.0]
+        self._sign_axis = 0
+        self._sign_t0 = None
+        self._sign_att0 = None
+        self._signs_done = False
+        self._direct_rates = None
         self._cal_t0 = None
         self._cal_samples = []
         self._settle_t0 = None
@@ -101,15 +118,20 @@ class ControllerVQ2:
 
         # Attitude P -> body rates. Roll/pitch are absolute targets; yaw is a
         # rate (heading is unobservable from gravity and we never need it).
-        if self.est.initialized:
+        if self._direct_rates is not None:
+            roll_rate, pitch_rate, yaw_rate_out = self._direct_rates
+        elif self.est.initialized:
             r, p, _ = self._est_euler()
-            roll_rate = _clamp(ATT_P * _wrap(roll_c - r), -MAX_RATE, MAX_RATE)
-            pitch_rate = _clamp(ATT_P * _wrap(pitch_c - p), -MAX_RATE, MAX_RATE)
+            roll_rate = self.rate_sign[0] * _clamp(
+                ATT_P * _wrap(roll_c - r), -MAX_RATE, MAX_RATE)
+            pitch_rate = self.rate_sign[1] * _clamp(
+                ATT_P * _wrap(pitch_c - p), -MAX_RATE, MAX_RATE)
+            yaw_rate_out = self.rate_sign[2] * YAW_SIGN * yaw_rate_c
         else:
-            roll_rate = pitch_rate = 0.0
+            roll_rate = pitch_rate = yaw_rate_out = 0.0
 
         send_attitude_rates(self.conn, self.boot_ms,
-                            roll_rate, pitch_rate, YAW_SIGN * yaw_rate_c, thrust)
+                            roll_rate, pitch_rate, yaw_rate_out, thrust)
         self._maybe_log(t, imu, thrust)
         time.sleep(1.0 / CONTROL_HZ)
 
@@ -141,9 +163,39 @@ class ControllerVQ2:
                 print(f"  [CAL] settled; hover={self.hover:.3f}", flush=True)
             return 0.0, 0.0, 0.0, self.hover
 
+        if not self._signs_done:
+            return self._sign_step(t)
+
         if MISSION == "race":
             return self._race_step(t)
         return 0.0, 0.0, 0.0, self.hover     # hover / frames: hold level
+
+    def _sign_step(self, t):
+        """Pulse each body axis; the estimator reports which way it moved."""
+        att = self._est_euler()
+        if self._sign_t0 is None:
+            self._sign_t0 = t
+            self._sign_att0 = att
+            pulse = [0.0, 0.0, 0.0]
+            pulse[self._sign_axis] = SIGN_PULSE_RATE
+            self._direct_rates = tuple(pulse)
+            print(f"  [SIGN] pulsing axis {self._sign_axis}", flush=True)
+
+        if t - self._sign_t0 >= SIGN_PULSE_S:
+            delta = _wrap(att[self._sign_axis] - self._sign_att0[self._sign_axis])
+            if abs(delta) >= SIGN_MIN_DELTA_RAD:
+                self.rate_sign[self._sign_axis] = 1.0 if delta > 0 else -1.0
+            print(f"  [SIGN] axis {self._sign_axis}: "
+                  f"delta={math.degrees(delta):+.1f} deg -> "
+                  f"{self.rate_sign[self._sign_axis]:+.0f}", flush=True)
+            self._sign_axis += 1
+            self._sign_t0 = None
+            if self._sign_axis >= 3:
+                self._signs_done = True
+                self._direct_rates = None
+                print(f"  [SIGN] done: {self.rate_sign}", flush=True)
+
+        return 0.0, 0.0, 0.0, self.hover
 
     def _calibrate(self, t, imu):
         if self._cal_t0 is None:
