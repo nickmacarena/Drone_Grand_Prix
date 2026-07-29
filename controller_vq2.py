@@ -68,6 +68,19 @@ VZ_LEAK_PER_S = 0.15      # bleed the estimate toward zero (bias guard)
 VZ_DAMP = 0.06            # thrust per (m/s) of unwanted vertical speed
 VZ_SETTLE_TOL = 0.5       # m/s; settle finishes early once below this
 
+# vz_est is ONLY trustworthy as a transient, measured from a known-zero start.
+# A steady descent produces zero net acceleration, so the accelerometer reads
+# exactly 1 g — indistinguishable from a hover. Integration therefore cannot
+# see constant-velocity motion at all, and the leak turns any leftover into a
+# standing bias. Elodin ground truth caught this cleanly (2026-07-28): true
+# vz -2.3 m/s while the estimate read +0.6, so the damper trimmed thrust BELOW
+# hover and drove the very descent it could not observe.
+#
+# So: damp only while settling the calibration climb, then stop and let VISION
+# own altitude — the gate's elevation in frame is an absolute reference, which
+# is exactly what an IMU cannot provide.
+VZ_DAMP_AFTER_SETTLE = False
+
 # ── Body-rate sign detection ─────────────────────────────────────────
 # VQ1 measured this sim's rate conventions as [roll +1, pitch -1, yaw -1] and
 # re-derived them every run. The rev-3390 rad/s type_mask bit does NOT
@@ -104,13 +117,19 @@ MAX_TILT_RAD = math.radians(20)
 
 
 class ControllerVQ2:
-    def __init__(self, mavlink_conn, shared: SharedState, system_boot_ms: int):
+    def __init__(self, mavlink_conn, shared: SharedState, system_boot_ms: int,
+                 up_world=UP_NED, yaw_sign=YAW_SIGN, cam=AIGP_CAM):
         self.conn = mavlink_conn
         self.shared = shared
         self.boot_ms = system_boot_ms
+        # Frame conventions are injected so this exact bring-up sequence can be
+        # debugged in Elodin (FLU/ENU) at ~90 s per run instead of 5 minutes.
+        self.up_world = up_world
+        self.yaw_sign = yaw_sign
+        self.cam = cam
 
         self.est = estimator.EstimatorState()
-        self.est_cfg = estimator.EstimatorConfig(up_world=UP_NED)
+        self.est_cfg = estimator.EstimatorConfig(up_world=up_world)
         self.servo_state = servo.ServoState()
         self.servo_cfg = servo.ServoConfig()
 
@@ -167,7 +186,7 @@ class ControllerVQ2:
                 ATT_P * _wrap(roll_c - r), -MAX_RATE, MAX_RATE)
             pitch_rate = self.rate_sign[1] * _clamp(
                 ATT_P * _wrap(pitch_c - p), -MAX_RATE, MAX_RATE)
-            yaw_rate_out = self.rate_sign[2] * YAW_SIGN * yaw_rate_c
+            yaw_rate_out = self.rate_sign[2] * self.yaw_sign * yaw_rate_c
         else:
             roll_rate = pitch_rate = yaw_rate_out = 0.0
 
@@ -204,7 +223,9 @@ class ControllerVQ2:
             if done:
                 self._settled = True
                 print(f"  [CAL] settled; hover={self.hover:.3f} "
-                      f"vz={self.vz_est:+.2f} m/s", flush=True)
+                      f"vz={self.vz_est:+.2f} m/s (zeroing: residual becomes "
+                      f"bias otherwise)", flush=True)
+                self.vz_est = 0.0
             return 0.0, 0.0, 0.0, self._damped_hover()
 
         if not self._signs_done:
@@ -302,7 +323,12 @@ class ControllerVQ2:
         self.vz_est *= max(0.0, 1.0 - VZ_LEAK_PER_S * dt)
 
     def _damped_hover(self) -> float:
-        """Hover thrust, minus whatever it takes to kill vertical speed."""
+        """Hover thrust, minus whatever it takes to kill vertical speed.
+
+        Only valid while `vz_est` is a fresh transient (see VZ_DAMP_AFTER_SETTLE).
+        """
+        if self._settled and not VZ_DAMP_AFTER_SETTLE:
+            return _clamp(self.hover, THRUST_MIN, THRUST_MAX)
         return _clamp(self.hover - VZ_DAMP * self.vz_est, THRUST_MIN, THRUST_MAX)
 
     def _vertical_accel(self, imu) -> float:
@@ -313,8 +339,11 @@ class ControllerVQ2:
         component along UP is what hover calibration needs.
         """
         f_world = quat_rotate(self.est.q, (imu.ax, imu.ay, imu.az))
-        a_world = (f_world[0], f_world[1], f_world[2] + G)   # NED: +z is down
-        return -(a_world[2])                                  # up-positive
+        g_world = (-G * self.up_world[0], -G * self.up_world[1], -G * self.up_world[2])
+        a_world = (f_world[0] + g_world[0], f_world[1] + g_world[1],
+                   f_world[2] + g_world[2])
+        return (a_world[0] * self.up_world[0] + a_world[1] * self.up_world[1]
+                + a_world[2] * self.up_world[2])
 
     def _race_step(self, t):
         """Full visual servoing: detect the gate, de-rotate the sighting into
@@ -324,7 +353,7 @@ class ControllerVQ2:
         if frame is not None and frame is not self._last_frame_seen:
             self._last_frame_seen = frame
             try:
-                obs = detect_gate(frame, AIGP_CAM)
+                obs = detect_gate(frame, self.cam)
             except Exception as e:                    # never let vision kill the loop
                 obs = None
                 if not self._detect_err_logged:
@@ -333,7 +362,7 @@ class ControllerVQ2:
             self._last_obs = obs
         obs = self._last_obs
         if obs is not None:
-            az, el = stabilized_bearing(AIGP_CAM, obs, self.est.q, UP_NED)
+            az, el = stabilized_bearing(self.cam, obs, self.est.q, self.up_world)
             target = servo.Target(az=az, el=el, confidence=obs.confidence)
         out = servo.step(self.servo_state, self.servo_cfg, t, target)
         if not out.have_target:

@@ -108,6 +108,46 @@ Also added handlers for HEARTBEAT, COMMAND_ACK, STATUSTEXT for visibility into t
   them every run; sign auto-detection is now restored, with the estimator as
   observer since ATTITUDE telemetry is gone. **Detect, never assume.**
 
+### Runs 4-5 + Elodin bring-up harness — an IMU cannot see a steady descent
+Run 4 fixed the ceiling (settle vz +5.5 -> +0.50) and got the first clean
+sign measurements — roll AND pitch both responded ~0.4 rad/s to a 0.5 command,
+no tumble. Then the drone sank at ~10 m/s into the base of gate 0 while thrust
+saturated at 0.84 trying to catch it.
+
+Four official-sim runs had now gone to bring-up rather than flying, so per the
+plan stated in advance, debugging moved to Elodin: `elodin_vq2_bringup.py`
+drives the SAME `ControllerVQ2` (frame conventions injected) from Elodin's IMU
+and prints TRUE altitude/vz beside the controller's estimates. One 90-second
+run found it:
+
+    t=3.0  TRUE vz=-2.33 | EST vz=+0.86  err=+3.20
+    t=7.0  TRUE vz=-2.27 | EST vz=+0.59  err=+2.86
+
+**The drone was falling at 2.3 m/s while the estimator insisted it was climbing
+at 0.6.** The damper therefore trimmed thrust BELOW hover and drove the very
+descent it could not observe.
+
+Root cause is physics, not a coding slip: **at constant velocity net
+acceleration is zero, so the accelerometer reads exactly 1 g — a steady
+descent is indistinguishable from a hover.** Integration sees only CHANGES in
+velocity, and the leak term turns any leftover transient into a standing bias.
+
+Fix: vz damping is confined to the settle transient (measured from a genuine
+known-zero on the pad, doing its one job of arresting the calibration climb),
+and the estimate is zeroed at settle so no residual carries forward. After
+that, **vision owns altitude** — a gate's elevation in frame is an absolute
+reference, which is precisely what an IMU cannot provide. Not a workaround:
+it is why the architecture put elevation control on the camera to begin with.
+
+Verified in Elodin: after settle, thrust holds at hover (0.16 vs the previous
+0.13) and the descent self-arrests -1.69 -> -0.53 -> -0.19 -> -0.07 m/s with
+altitude converging. `EST vz` remains biased, as physics dictates, but is now
+inert because nothing acts on it.
+
+(Harness caveat: Elodin's VQ1 replica spawns the drone mid-air, so it free-falls
+for the first second and contaminates the calibration measurement there. The
+official sim starts on a ramp and measured hover consistently at 0.238-0.251.)
+
 ### Run 3 — we were flying into the hangar ceiling
 Gyro-based sign detection gave a clean first measurement (`axis 0: commanded
 +0.50 -> gyro +0.453`, near-unity gain, sign +1 — which also confirms the
