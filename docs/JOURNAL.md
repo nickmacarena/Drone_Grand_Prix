@@ -89,6 +89,50 @@ Also added handlers for HEARTBEAT, COMMAND_ACK, STATUSTEXT for visibility into t
 
 ---
 
+## 2026-07-27/28 — First official VQ2 run + gate detector working
+
+**Run 1 on the real VQ2 plant** (`main_vq2.py`, MISSION=frames). Confirmed:
+- **Vision works**: Pillow decode, 1380 frames decoded, 45 saved. No OpenCV.
+- **IMU-only hover calibration = 0.244** (VQ1 measured 0.25) — derived from
+  accelerometer alone, since VQ2 removed velocity.
+- **Estimator initialised and read pitch -17.8 deg at rest** = the ~18 deg
+  start ramp we characterised in VQ1, independently rediscovered.
+- **`fields_updated=0x3f`: accel + gyro ONLY.** mag=nan, pressure_alt=nan.
+  So heading and absolute altitude are permanently unobservable from the IMU.
+  That is exactly what the visual-servoing architecture already assumed
+  (body-relative bearings; elevation from the image), but it closes the door
+  on any compass/altimeter fallback.
+- **It tumbled** once the attitude loop engaged (-17.8 -> +73.5 -> -137.8 deg).
+  Cause: I assumed the rev-3390 rad/s type_mask bit normalised the body-rate
+  SIGN conventions. It does not. VQ1 measured them as [+1,-1,-1] and detected
+  them every run; sign auto-detection is now restored, with the estimator as
+  observer since ATTITUDE telemetry is gone. **Detect, never assume.**
+
+### Stage 3b — gate detector: WORKING on real imagery
+The captured frames overturn the README's "high-fidelity 3D-scanned
+environments": VQ2 is a dark, desaturated indoor hangar with **saturated
+orange-red square gates** and cyan guidance lines threading between them. A
+hue threshold isolates the gates almost perfectly.
+
+`detector.py` (numpy + Pillow only — opencv has no win_arm64 wheels ever):
+hue mask measured from real frames -> 4x block-reduced mask -> pure-Python
+union-find connected components -> aspect filter -> centroid.
+- The centroid of a square FRAME is the centre of its opening: the servo's
+  aim point for free.
+- Apparent width -> monocular range via the known 1.5 m opening.
+- Colour rejects the white ceiling panels that would fool a shape-only
+  detector; aspect rejects the cyan guide lines.
+
+**Measured on 45 real frames: 38/45 detected, 14 ms/frame (~71 fps).** All 7
+non-detections are correct refusals — 6 are ceiling-facing tumble frames with
+zero gate-coloured pixels, and 1 is the drone at/inside a gate (a diffuse red
+wash with no gate to aim at). Effectively 100% correct behaviour.
+
+Detector is now wired into `controller_vq2` race mode:
+detect -> stabilized_bearing (IMU de-rotation) -> servo.
+
+---
+
 ## 2026-07-26 — VQ2 dropped: it deletes almost everything VQ1 stood on
 
 Sim v1.0.3391 + PyAIPilotExample-v4. Diffed v4 against v1; the example carries
