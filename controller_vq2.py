@@ -63,9 +63,25 @@ SETTLE_S = 2.0            # let the calibration climb bleed off
 # the drone tumbled seconds after the attitude loop engaged (run 1, 2026-07-27
 # attitude went -17.8 -> +73.5 -> -137.8). Detect, never assume. The estimator
 # is the observer now, since ATTITUDE telemetry is gone.
-SIGN_PULSE_RATE = 0.6     # rad/s
-SIGN_PULSE_S = 0.4
-SIGN_MIN_DELTA_RAD = 0.02
+# Measured from the GYRO, not from integrated attitude. Run 2 (2026-07-28)
+# detected signs by pulsing an axis and watching the estimator's Euler angles:
+# with no levelling between pulses the roll pulse left the drone at 39 deg,
+# the pitch pulse then acted on an already-banked airframe, and by the yaw
+# pulse it was inverted at 120 deg — the measurement destroyed what it was
+# measuring, and axis 2 returned garbage (+97.6 deg).
+#
+# Comparing commanded rate against the gyro is direct, instantaneous, and
+# needs no attitude integration, so the pulse can be small and brief enough
+# to barely disturb the aircraft. It is also exactly the mapping we want: the
+# estimator integrates this same gyro, so its attitude — and therefore the
+# attitude loop's output — lives in the gyro's convention.
+SIGN_PULSE_RATE = 0.5     # rad/s
+SIGN_PULSE_S = 0.25
+SIGN_SETTLE_S = 0.35      # zero rates between axes, so each starts from calm
+SIGN_MIN_GYRO = 0.05      # rad/s; below this the axis did not respond
+
+# After detection, level out before flying: the pulses leave some attitude.
+LEVEL_S = 1.5
 
 # ── Attitude control (same shape as the VQ1 stack, IMU-driven) ───────
 ATT_P = 5.0               # rad/s of body rate per rad of attitude error
@@ -92,6 +108,10 @@ class ControllerVQ2:
         self._sign_t0 = None
         self._sign_att0 = None
         self._signs_done = False
+        self._sign_samples = []
+        self._sign_resting = False
+        self._level_t0 = None
+        self._leveled = False
         self._direct_rates = None
         self._cal_t0 = None
         self._cal_samples = []
@@ -168,44 +188,72 @@ class ControllerVQ2:
             return 0.0, 0.0, 0.0, self.hover
 
         if not self._signs_done:
-            return self._sign_step(t)
+            return self._sign_step(t, imu)
+
+        # Recover whatever attitude the pulses left behind before flying.
+        if not self._leveled:
+            if self._level_t0 is None:
+                self._level_t0 = t
+            if t - self._level_t0 >= LEVEL_S:
+                self._leveled = True
+                print("  [LEVEL] recovered; starting mission", flush=True)
+            return 0.0, 0.0, 0.0, self.hover
 
         if MISSION == "race":
             return self._race_step(t)
         return 0.0, 0.0, 0.0, self.hover     # hover / frames: hold level
 
-    def _sign_step(self, t):
-        """Pulse each body axis; the estimator reports which way it moved."""
-        att = self._est_euler()
+    def _sign_step(self, t, imu):
+        """Pulse an axis and compare the GYRO against the command.
+
+        Alternates pulse / rest so each axis is measured from a calm start and
+        the aircraft is never left rotating.
+        """
         if self._sign_t0 is None:
             self._sign_t0 = t
-            self._sign_att0 = att
+            self._sign_samples = []
+            self._sign_resting = False
             pulse = [0.0, 0.0, 0.0]
             pulse[self._sign_axis] = SIGN_PULSE_RATE
             self._direct_rates = tuple(pulse)
             print(f"  [SIGN] pulsing axis {self._sign_axis}", flush=True)
 
-        if t - self._sign_t0 >= SIGN_PULSE_S:
-            delta = _wrap(att[self._sign_axis] - self._sign_att0[self._sign_axis])
-            if abs(delta) >= SIGN_MIN_DELTA_RAD:
-                self.rate_sign[self._sign_axis] = 1.0 if delta > 0 else -1.0
-            print(f"  [SIGN] axis {self._sign_axis}: "
-                  f"delta={math.degrees(delta):+.1f} deg -> "
-                  f"{self.rate_sign[self._sign_axis]:+.0f}", flush=True)
+        elapsed = t - self._sign_t0
+
+        if not self._sign_resting:
+            if imu is not None:
+                self._sign_samples.append(
+                    (imu.gx, imu.gy, imu.gz)[self._sign_axis])
+            if elapsed >= SIGN_PULSE_S:
+                n = len(self._sign_samples)
+                measured = sum(self._sign_samples) / n if n else 0.0
+                if abs(measured) >= SIGN_MIN_GYRO:
+                    self.rate_sign[self._sign_axis] = 1.0 if measured > 0 else -1.0
+                    verdict = f"{self.rate_sign[self._sign_axis]:+.0f}"
+                else:
+                    verdict = "no response, keeping default"
+                print(f"  [SIGN] axis {self._sign_axis}: commanded "
+                      f"{SIGN_PULSE_RATE:+.2f} -> gyro {measured:+.3f} rad/s "
+                      f"({n} samples) -> {verdict}", flush=True)
+                # Rest: zero rates, let the axis stop before the next test.
+                self._sign_resting = True
+                self._direct_rates = (0.0, 0.0, 0.0)
+            return 0.0, 0.0, 0.0, self.hover
+
+        if elapsed >= SIGN_PULSE_S + SIGN_SETTLE_S:
             self._sign_axis += 1
             self._sign_t0 = None
             if self._sign_axis >= 3:
                 self._signs_done = True
                 self._direct_rates = None
                 print(f"  [SIGN] done: {self.rate_sign}", flush=True)
-
         return 0.0, 0.0, 0.0, self.hover
 
     def _calibrate(self, t, imu):
         if self._cal_t0 is None:
             self._cal_t0 = t
             print(f"  [CAL] thrust={CAL_THRUST} for {CAL_DURATION_S}s "
-                  f"(vertical accel from IMU — VQ2 has no velocity)", flush=True)
+                  f"(vertical accel from IMU - VQ2 has no velocity)", flush=True)
 
         elapsed = t - self._cal_t0
         if elapsed > CAL_SKIP_S:
