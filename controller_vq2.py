@@ -50,11 +50,23 @@ UP_NED = (0.0, 0.0, -1.0)
 YAW_SIGN = +1.0
 
 # ── Calibration ──────────────────────────────────────────────────────
-CAL_THRUST = 0.35
-CAL_DURATION_S = 1.2
+CAL_THRUST = 0.30         # gentler than VQ1's 0.35: every m/s of climb
+CAL_DURATION_S = 1.0      # bought here has to be paid back before flying
 CAL_SKIP_S = 0.3          # ignore spool-up
 HOVER_MIN, HOVER_MAX = 0.10, 0.80
-SETTLE_S = 2.0            # let the calibration climb bleed off
+SETTLE_S = 2.5            # ACTIVELY arrest the calibration climb
+
+# Vertical velocity, integrated from the IMU. VQ2 removed LOCAL_POSITION_NED,
+# so nothing reports how fast we are climbing — and holding hover thrust means
+# zero ACCELERATION, not zero velocity. Run 3 (2026-07-28) calibrated at 0.35
+# against a 0.238 hover, left the settle phase still climbing at ~5.5 m/s,
+# coasted ~20 m up inside a roofed hangar and hit the ceiling (a_up spike of
+# +13.9 m/s^2, then tumbling). Integration drifts over minutes but is accurate
+# over the seconds needed to stop a climb; the leak keeps bias bounded, and
+# this is only ever used as a DAMPING term, never as absolute altitude.
+VZ_LEAK_PER_S = 0.15      # bleed the estimate toward zero (bias guard)
+VZ_DAMP = 0.06            # thrust per (m/s) of unwanted vertical speed
+VZ_SETTLE_TOL = 0.5       # m/s; settle finishes early once below this
 
 # ── Body-rate sign detection ─────────────────────────────────────────
 # VQ1 measured this sim's rate conventions as [roll +1, pitch -1, yaw -1] and
@@ -103,6 +115,8 @@ class ControllerVQ2:
         self.servo_cfg = servo.ServoConfig()
 
         self.hover = None
+        self.vz_est = 0.0         # m/s, +up. IMU-integrated; damping only.
+        self._vz_last_t = None
         self.rate_sign = [1.0, 1.0, 1.0]
         self._sign_axis = 0
         self._sign_t0 = None
@@ -137,6 +151,9 @@ class ControllerVQ2:
         if imu is not None:
             estimator.update(self.est, self.est_cfg, t,
                              (imu.gx, imu.gy, imu.gz), (imu.ax, imu.ay, imu.az))
+
+        if imu is not None and self.est.initialized:
+            self._integrate_vz(t, imu)
 
         roll_c, pitch_c, yaw_rate_c, thrust = self._step(t, imu)
 
@@ -182,10 +199,13 @@ class ControllerVQ2:
         if not self._settled:
             if self._settle_t0 is None:
                 self._settle_t0 = t
-            if t - self._settle_t0 >= SETTLE_S:
+            done = (t - self._settle_t0 >= SETTLE_S
+                    or abs(self.vz_est) < VZ_SETTLE_TOL)
+            if done:
                 self._settled = True
-                print(f"  [CAL] settled; hover={self.hover:.3f}", flush=True)
-            return 0.0, 0.0, 0.0, self.hover
+                print(f"  [CAL] settled; hover={self.hover:.3f} "
+                      f"vz={self.vz_est:+.2f} m/s", flush=True)
+            return 0.0, 0.0, 0.0, self._damped_hover()
 
         if not self._signs_done:
             return self._sign_step(t, imu)
@@ -196,12 +216,13 @@ class ControllerVQ2:
                 self._level_t0 = t
             if t - self._level_t0 >= LEVEL_S:
                 self._leveled = True
-                print("  [LEVEL] recovered; starting mission", flush=True)
-            return 0.0, 0.0, 0.0, self.hover
+                print(f"  [LEVEL] recovered; vz={self.vz_est:+.2f} m/s; "
+                      f"starting mission", flush=True)
+            return 0.0, 0.0, 0.0, self._damped_hover()
 
         if MISSION == "race":
             return self._race_step(t)
-        return 0.0, 0.0, 0.0, self.hover     # hover / frames: hold level
+        return 0.0, 0.0, 0.0, self._damped_hover()   # hover/frames: hold still
 
     def _sign_step(self, t, imu):
         """Pulse an axis and compare the GYRO against the command.
@@ -238,7 +259,7 @@ class ControllerVQ2:
                 # Rest: zero rates, let the axis stop before the next test.
                 self._sign_resting = True
                 self._direct_rates = (0.0, 0.0, 0.0)
-            return 0.0, 0.0, 0.0, self.hover
+            return 0.0, 0.0, 0.0, self._damped_hover()
 
         if elapsed >= SIGN_PULSE_S + SIGN_SETTLE_S:
             self._sign_axis += 1
@@ -247,11 +268,12 @@ class ControllerVQ2:
                 self._signs_done = True
                 self._direct_rates = None
                 print(f"  [SIGN] done: {self.rate_sign}", flush=True)
-        return 0.0, 0.0, 0.0, self.hover
+        return 0.0, 0.0, 0.0, self._damped_hover()
 
     def _calibrate(self, t, imu):
         if self._cal_t0 is None:
             self._cal_t0 = t
+            self.vz_est = 0.0          # at rest on the pad: a known zero
             print(f"  [CAL] thrust={CAL_THRUST} for {CAL_DURATION_S}s "
                   f"(vertical accel from IMU - VQ2 has no velocity)", flush=True)
 
@@ -267,6 +289,21 @@ class ControllerVQ2:
             print(f"  [CAL] a_up={a_up:+.2f} m/s^2 over {n} samples "
                   f"-> hover={self.hover:.3f}", flush=True)
         return 0.0, 0.0, 0.0, CAL_THRUST
+
+    def _integrate_vz(self, t, imu):
+        if self._vz_last_t is None:
+            self._vz_last_t = t
+            return
+        dt = t - self._vz_last_t
+        self._vz_last_t = t
+        if dt <= 0.0 or dt > 0.2:
+            return
+        self.vz_est += self._vertical_accel(imu) * dt
+        self.vz_est *= max(0.0, 1.0 - VZ_LEAK_PER_S * dt)
+
+    def _damped_hover(self) -> float:
+        """Hover thrust, minus whatever it takes to kill vertical speed."""
+        return _clamp(self.hover - VZ_DAMP * self.vz_est, THRUST_MIN, THRUST_MAX)
 
     def _vertical_accel(self, imu) -> float:
         """Kinematic acceleration along world UP, from the IMU alone.
@@ -331,7 +368,7 @@ class ControllerVQ2:
         det = (f"DET u={o.u:5.1f} v={o.v:5.1f} rng={o.range_m:5.1f} conf={o.confidence:.2f}"
                if o is not None else "no-gate")
         print(f"  [VQ2] {MISSION} {att} a_up={a_up:+5.2f} thr={thrust:.2f} "
-              f"hov={hov} armed={hb.armed if hb else '?'} "
+              f"vz={self.vz_est:+5.2f} hov={hov} armed={hb.armed if hb else '?'} "
               f"gate={rs.active_gate_index if rs else '?'} "
               f"started={rs.race_started if rs else '?'} frame={frames} {det}",
               flush=True)

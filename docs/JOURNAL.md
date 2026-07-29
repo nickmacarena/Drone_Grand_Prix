@@ -108,6 +108,32 @@ Also added handlers for HEARTBEAT, COMMAND_ACK, STATUSTEXT for visibility into t
   them every run; sign auto-detection is now restored, with the estimator as
   observer since ATTITUDE telemetry is gone. **Detect, never assume.**
 
+### Run 3 — we were flying into the hangar ceiling
+Gyro-based sign detection gave a clean first measurement (`axis 0: commanded
++0.50 -> gyro +0.453`, near-unity gain, sign +1 — which also confirms the
+rev-3390 rad/s bit works). But axis 1 read +5.05 rad/s: by then the drone was
+already inverted at roll -173 deg, so that number is a tumble, not a response.
+
+Root cause was not the pulses. Calibration burns CAL_THRUST against a 0.238
+hover for over a second, which leaves ~5.5 m/s of CLIMB. The settle phase then
+held *hover* thrust — which means zero ACCELERATION, not zero velocity — so the
+drone coasted upward through settle and sign detection, ~20 m inside a roofed
+hangar, and hit the ceiling (`a_up` spike to +13.9 m/s^2, then tumbling).
+
+In VQ1 the settle phase damped this using velocity telemetry. VQ2 deleted
+LOCAL_POSITION_NED, and I replaced that with a passive wait, which arrests
+nothing. **Nothing in VQ2 reports how fast you are climbing.**
+
+Fix: integrate vertical acceleration into a `vz_est` (reset to a known zero on
+the pad, leaked slowly to bound bias) and use it as a damping term on thrust
+everywhere during bring-up. It drifts over minutes but is accurate over the
+seconds needed to stop a climb, and it is never used as absolute altitude.
+Also gentled the calibration burn (0.35 -> 0.30, 1.2 s -> 1.0 s): every m/s of
+climb bought there has to be paid back before flying.
+
+Simulated against the real numbers: peak bring-up altitude 20 m -> **3.0 m**,
+vertical speed at mission start 5.5 -> **0.23 m/s**.
+
 ### Stage 3b — gate detector: WORKING on real imagery
 The captured frames overturn the README's "high-fidelity 3D-scanned
 environments": VQ2 is a dark, desaturated indoor hangar with **saturated
