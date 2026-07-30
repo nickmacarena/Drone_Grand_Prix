@@ -147,6 +147,7 @@ class ControllerVQ2:
         self.est = estimator.EstimatorState()
         self.est_cfg = estimator.EstimatorConfig(up_world=up_world)
         self.servo_state = servo.ServoState()
+        self._last_gate_index = None
         self.servo_cfg = servo.ServoConfig()
 
         self.hover = None if CALIBRATE else HOVER_DEFAULT
@@ -369,6 +370,19 @@ class ControllerVQ2:
     def _race_step(self, t):
         """Full visual servoing: detect the gate, de-rotate the sighting into
         the level frame with the IMU attitude, servo onto it."""
+        # The sim advancing active_gate_index is the only unambiguous progress
+        # signal VQ2 gives us, and run 7 ignored it: after clearing gate 0 the
+        # servo kept steering on a track that described a gate now behind it,
+        # turned ~147 deg away, and never recovered.
+        rs = self.shared.race_status
+        if rs is not None and rs.active_gate_index != self._last_gate_index:
+            if self._last_gate_index is not None:
+                print(f"  [GATE] passed {self._last_gate_index} -> "
+                      f"{rs.active_gate_index}; re-centring search", flush=True)
+                servo.gate_passed(self.servo_state)
+                self._last_obs = None
+            self._last_gate_index = rs.active_gate_index
+
         target = None
         frame = self.shared.latest_frame
         if frame is not None and frame is not self._last_frame_seen:

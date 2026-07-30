@@ -96,17 +96,31 @@ class ServoConfig:
     hold_s: float = 0.8              # keep steering on a stale fix this long
     hold_drive_decay: float = 0.6    # forward drive multiplier while coasting
 
-    # Behaviour when no gate is visible
-    search_yaw_rate: float = 0.35    # rad/s, toward where it was last seen
+    # Behaviour when no gate is visible.
+    #
+    # Official run 7 passed gate 0 and then never found gate 1. The old search
+    # yawed in ONE direction forever ("toward where it was last seen"), so it
+    # turned ~147 deg off course, chased one of the many other red gates in the
+    # hangar, lost that too, and kept turning. A course continues roughly
+    # FORWARD, so the heading we passed the gate on is the best prior we have.
+    # Sweep outward from it, alternating and widening, instead of committing to
+    # one direction.
+    search_yaw_rate: float = 0.55    # rad/s while sweeping
+    sweep_limit_rad: float = 0.61    # first sweep: +/- 35 deg from the prior
+    sweep_growth: float = 1.6        # widen on each reversal
+    sweep_limit_max_rad: float = 3.4 # eventually cover the full circle
     # The camera is pitched 20 deg UP with a 58.7 deg vertical FOV, so nothing
     # more than ~9 deg below the flight path is visible at all. A pure yaw
     # sweep can therefore hunt forever past a gate that is simply below us
     # (proved in tests/test_servo.py). Descending raises it into frame.
-    search_descend: float = 0.18     # vertical effort, downward
-    search_descend_s: float = 3.0    # ...for this long only. An unbounded
-                                     # descent flies into the ground and then
-                                     # sits there spinning (observed: reached
-                                     # z=0 at t=28 and never recovered).
+    # The camera cannot see below ~9 deg, so sinking DOES raise a low gate into
+    # frame — but it must not be a one-way trip. VQ2 gives no altitude and
+    # vz_est is unobservable in steady flight, so hover thrust PRESERVES any
+    # descent rather than arresting it: run 7 sank from -1.1 to -9.4 m/s while
+    # searching and never recovered. So oscillate instead of descending, and
+    # spend equal time above the entry altitude, which nets to zero drift.
+    search_descend: float = 0.18     # peak vertical effort, either direction
+    search_vert_period_s: float = 2.4  # full down-then-up cycle
     search_creep: float = 0.38       # NOT a token creep. Forward tilt pitches
                                      # the nose down, swinging the camera from
                                      # ~9 deg of downward view to ~23 deg. A
@@ -125,6 +139,10 @@ class ServoState:
     az_f: float = 0.0                # smoothed bearing (the working estimate)
     el_f: float = 0.0
     have_fix: bool = False
+    sweep_pos: float = 0.0           # commanded yaw accumulated while searching
+    sweep_dir: float = 1.0
+    sweep_limit: float | None = None
+    search_t: float = 0.0            # time spent in the current search
     az_rate: float = 0.0             # d(az)/dt, smoothed — the damping signal
     el_rate: float = 0.0
     rng_f: float | None = None       # smoothed range, for continuity gating
@@ -253,16 +271,54 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
         )
 
     # ── Properly lost: hold level, stop climbing, sweep toward last sight ──
+    if not state.searching:                      # search just began
+        state.sweep_pos = 0.0
+        state.sweep_limit = cfg.sweep_limit_rad
+        state.search_t = 0.0
+        # Start toward wherever the gate last was; with no history, go right.
+        state.sweep_dir = 1.0 if state.last_az >= 0.0 else -1.0
     state.searching = True
     state.have_fix = False
     state.az_rate = 0.0
     state.el_rate = 0.0
-    direction = 1.0 if state.last_az >= 0.0 else -1.0
-    descending = state.time_since_seen <= cfg.hold_s + cfg.search_descend_s
+    state.search_t += dt
+
+    # Bounded, widening sweep about the heading we started searching from.
+    limit = state.sweep_limit or cfg.sweep_limit_rad
+    state.sweep_pos += state.sweep_dir * cfg.search_yaw_rate * dt
+    if abs(state.sweep_pos) >= limit:
+        state.sweep_dir = -state.sweep_dir
+        state.sweep_limit = min(limit * cfg.sweep_growth, cfg.sweep_limit_max_rad)
+
+    # Vertical search oscillates, so a fruitless search does not walk the
+    # aircraft into the floor (see search_descend).
+    phase = 2.0 * math.pi * state.search_t / max(cfg.search_vert_period_s, 1e-3)
     return ServoOutput(
         tilt_fwd=cfg.search_creep,
         tilt_right=0.0,
-        vertical=(-cfg.search_descend if descending else 0.0),
-        yaw_rate=direction * cfg.search_yaw_rate,
+        vertical=-cfg.search_descend * math.sin(phase),
+        yaw_rate=state.sweep_dir * cfg.search_yaw_rate,
         have_target=False,
     )
+
+
+def gate_passed(state: ServoState) -> None:
+    """Called when the sim's active_gate_index advances.
+
+    Proof we are through, and the moment the old track becomes meaningless: it
+    describes a gate now behind us. Re-centre the search prior on the current
+    heading, because the next gate is most likely ahead.
+    """
+    state.have_fix = False
+    state.rng_f = None
+    state.az_f = 0.0
+    state.el_f = 0.0
+    state.az_rate = 0.0
+    state.el_rate = 0.0
+    state.last_az = 0.0
+    state.t_last_accept = None
+    state.rejecting_since = None
+    state.searching = False          # forces a fresh, re-centred sweep
+    state.sweep_pos = 0.0
+    state.sweep_limit = None
+    state.search_t = 0.0

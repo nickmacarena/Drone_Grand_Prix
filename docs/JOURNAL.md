@@ -609,3 +609,41 @@ width but divided by the 1.5 m INNER opening, so it underestimates by roughly
 the frame-to-opening ratio (~1.6x). Stationary on the pad it reports 5.7 m.
 Control never uses range — only the continuity gate and logging do, both in
 consistent units — so this is cosmetic for now.
+
+## VQ2 official run 7 — GATE 0 CLEARED, then lost in the lost-target path
+
+active_gate_index advanced 0 -> 1. First gate ever passed in VQ2 on the
+official sim. The PD fix held the approach: v stayed 169 -> 191 near centre
+instead of dropping away as it did in run 6.
+
+Then it never found gate 1, and failed two ways, both in code that had never
+run before because we had never passed a gate:
+
+1. Search yawed ONE direction forever. `direction = 1 if last_az >= 0 else -1`
+   never reverses, so it turned ~147 deg off course, chased one of the many
+   other red gates in the hangar, lost that too, and kept going.
+
+2. No altitude reference exists when nothing is visible. This is vz_est
+   unobservability in a new place: hover thrust PRESERVES vertical velocity
+   rather than arresting it, so once sinking, nothing stopped it (-1.1 ->
+   -9.4 m/s). search_descend was actively making it worse — and gate 0 sits
+   ABOVE the pad, so descending to search is backwards.
+
+Fixes:
+  * Bounded widening sweep. A course continues roughly forward, so the heading
+    we passed the gate on is the best prior available. Sweep +/-35 deg about it,
+    alternating, widening 1.6x per reversal up to full circle. Test: peak 89 deg
+    and it comes back, vs run 7's monotone 147 and climbing.
+  * Vertical search oscillates (2.4 s period) instead of descending, so a
+    fruitless search nets zero altitude drift. Test asserts |integral| < 0.15;
+    measured -0.000.
+  * servo.gate_passed(), called on the active_gate_index transition. That index
+    is the only unambiguous progress signal VQ2 gives us and run 7 ignored it
+    completely: after clearing gate 0 the servo kept steering on a track that
+    described a gate now behind it. It now clears the track and re-centres the
+    search prior.
+
+Nick's observation that gate 1 never entered the camera's view is the thing to
+confirm from vq2_frames8 — if gate 1 is genuinely outside a 90 deg HFoV cone
+tilted 20 deg up, no search tuning fixes it and the course geometry has to
+drive where we point the camera.

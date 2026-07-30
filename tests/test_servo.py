@@ -131,6 +131,10 @@ def main():
                           enu=False)
         check(name, ok, f"closest approach {best:.2f} m")
 
+    print("\n[search behaviour — official run 7 regression]")
+    test_search_is_bounded()
+    test_gate_passed_clears_stale_track()
+
     print("\n[vertical dynamics — official run 6 regression]")
     test_vertical_overshoot()
 
@@ -245,6 +249,51 @@ def test_vertical_overshoot():
                        for u in (2.4, 3.5) for c in (6.0, 9.0))
     check("test detects a P-only loop", worst_p_only > HALF_OPENING,
           f"P-only misses by {worst_p_only:.2f} m — would hit the top bar")
+
+
+def test_search_is_bounded():
+    """Official run 7: search yawed one way forever and sank into the floor.
+
+    After clearing gate 0 the aircraft turned ~147 deg off course chasing
+    distant hangar gates, and sank from -1.1 to -9.4 m/s because hover thrust
+    PRESERVES a descent when altitude is unobservable. A search must stay near
+    the heading it started from and must not walk the aircraft down.
+    """
+    cfg = servo.ServoConfig()
+    st = servo.ServoState()
+    servo.gate_passed(st)          # as the controller does on index advance
+
+    dt = 0.02
+    heading = 0.0        # integrate the commanded yaw rate
+    vert_sum = 0.0
+    worst_heading = 0.0
+    for i in range(int(12.0 / dt)):
+        out = servo.step(st, cfg, i * dt, None)     # nothing ever seen
+        heading += out.yaw_rate * dt
+        vert_sum += out.vertical * dt
+        worst_heading = max(worst_heading, abs(heading))
+
+    check("search stays near its starting heading",
+          worst_heading < math.radians(150.0),
+          f"swept to {math.degrees(worst_heading):.0f} deg")
+    check("search reverses rather than spinning one way",
+          st.sweep_dir != 0.0 and abs(heading) < worst_heading * 0.9,
+          f"ended {math.degrees(heading):.0f} deg vs peak "
+          f"{math.degrees(worst_heading):.0f} deg")
+    check("search does not sink on average", abs(vert_sum) < 0.15,
+          f"integrated vertical effort {vert_sum:+.3f}")
+
+
+def test_gate_passed_clears_stale_track():
+    """A track describing a gate now behind us must not steer the next leg."""
+    cfg = servo.ServoConfig()
+    st = servo.ServoState()
+    servo.step(st, cfg, 0.0, servo.Target(az=0.5, el=0.1, confidence=1.0,
+                                          range_m=4.0))
+    check("track exists before pass", st.have_fix)
+    servo.gate_passed(st)
+    check("track cleared by gate pass", not st.have_fix)
+    check("bearing prior re-centred", st.az_f == 0.0 and st.last_az == 0.0)
 
 
 if __name__ == "__main__":
