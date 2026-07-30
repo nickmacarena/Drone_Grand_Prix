@@ -82,6 +82,13 @@ YAW_SIGN = -1.0
 # agree in sign often enough, steering is inverted and we flip once.
 # Thresholds live in servo.PolarityCheck.
 
+# MISSION=yawtest: isolate rotation from translation (see _yaw_test_step).
+YAW_AUTOFLIP = os.environ.get("YAW_AUTOFLIP", "0") == "1"
+
+YAWTEST_RATE = 0.35        # rad/s — slow, so the gate stays in frame
+YAWTEST_S = 6.0            # rotate for this long
+YAWTEST_SETTLE_S = 3.0     # hold still first, to fix the starting bearing
+
 # ── Calibration ──────────────────────────────────────────────────────
 CAL_THRUST = 0.30         # gentler than VQ1's 0.35: every m/s of climb
 CAL_DURATION_S = 1.0      # bought here has to be paid back before flying
@@ -166,6 +173,12 @@ class ControllerVQ2:
         self.servo_state = servo.ServoState()
         self._last_gate_index = None
         self._yaw_chk = servo.PolarityCheck()
+        self._yawtest_t0 = None
+        self._yawtest_u0 = None
+        self._yawtest_yaw0 = 0.0
+        self._yawtest_last_u = None
+        self._yawtest_last_yaw = 0.0
+        self._yawtest_done = False
         self.servo_cfg = servo.ServoConfig()
 
         self.hover = None if CALIBRATE else HOVER_DEFAULT
@@ -284,7 +297,89 @@ class ControllerVQ2:
 
         if MISSION == "race":
             return self._race_step(t)
+        if MISSION == "yawtest":
+            return self._yaw_test_step(t)
         return 0.0, 0.0, 0.0, self._damped_hover()   # hover/frames: hold still
+
+    def _yaw_test_step(self, t):
+        """Measure the yaw convention directly, with translation removed.
+
+        Six runs were spent inferring this from race logs and every inference was
+        confounded the same way. At the ranges where it mattered (rng 1-4 m,
+        gate 30-40 deg off axis, ~8 m/s), the bearing rate caused by TRANSLATION
+        is v*sin(az)/r ~ 1.3 rad/s — triple the commanded yaw rate. Azimuth was
+        moving because we were flying past the gate, not because we were
+        rotating, so it carried almost no information about the sign. Runs 10 and
+        11 flew opposite signs and BOTH showed azimuth increasing, which is the
+        proof that the measurement was meaningless.
+
+        Rotation and translation separate only when translation is zero. So:
+        hover in place, no forward tilt, no roll, and rotate slowly. Then du/dt
+        is purely rotational and the convention is unambiguous.
+
+        Run with MISSION=yawtest. Takes about 12 s and does not need a gate to be
+        passed, only seen.
+        """
+        if self._yawtest_t0 is None:
+            self._yawtest_t0 = t
+            print(f"  [YAWTEST] hovering, commanding yaw {YAWTEST_RATE:+.2f} "
+                  f"rad/s for {YAWTEST_S}s. No forward tilt: any u movement is "
+                  f"rotation only.", flush=True)
+        elapsed = t - self._yawtest_t0
+
+        # Observe the gate, but do not act on it.
+        frame = self.shared.latest_frame
+        if frame is not None and frame is not self._last_frame_seen:
+            self._last_frame_seen = frame
+            try:
+                self._last_obs = detect_gate(frame, self.cam)
+            except Exception:
+                self._last_obs = None
+        obs = self._last_obs
+        _, _, yaw_est = self._est_euler()
+
+        if elapsed < YAWTEST_SETTLE_S:
+            if obs is not None:                  # record the starting point
+                self._yawtest_u0 = obs.u
+                self._yawtest_yaw0 = yaw_est
+            return 0.0, 0.0, 0.0, self._damped_hover()
+
+        if elapsed < YAWTEST_SETTLE_S + YAWTEST_S:
+            if obs is not None and self._yawtest_u0 is not None:
+                self._yawtest_last_u = obs.u
+                self._yawtest_last_yaw = yaw_est
+            # Pure rotation: hover thrust, level, commanded yaw only.
+            return 0.0, 0.0, YAWTEST_RATE, self._damped_hover()
+
+        if not self._yawtest_done:
+            self._yawtest_done = True
+            self._report_yaw_test()
+        return 0.0, 0.0, 0.0, self._damped_hover()
+
+    def _report_yaw_test(self):
+        """State the convention plainly, with the numbers behind it."""
+        u0, u1 = self._yawtest_u0, self._yawtest_last_u
+        if u0 is None or u1 is None:
+            print("  [YAWTEST] no gate held in view — point the drone at a gate "
+                  "and rerun", flush=True)
+            return
+        du = u1 - u0
+        dyaw = math.degrees(self._yawtest_last_yaw - self._yawtest_yaw0)
+        # Commanding +yaw_rate through the current sign chain produced this
+        # rotation. Correct convention: a RIGHT turn sweeps the scene LEFT, so
+        # the gate's u must DECREASE.
+        applied = self.rate_sign[2] * self.yaw_sign * YAWTEST_RATE
+        want = "decrease" if applied > 0 else "increase"
+        got = "decrease" if du < 0 else "increase"
+        ok = (want == got)
+        print(f"  [YAWTEST] commanded {YAWTEST_RATE:+.2f} rad/s "
+              f"(applied {applied:+.2f} after rate_sign*yaw_sign)", flush=True)
+        print(f"  [YAWTEST] gate u {u0:.1f} -> {u1:.1f}  (du={du:+.1f} px), "
+              f"gyro yaw moved {dyaw:+.1f} deg", flush=True)
+        print(f"  [YAWTEST] expected u to {want}, saw it {got} -> "
+              f"{'CORRECT' if ok else 'INVERTED'}: "
+              f"YAW_SIGN should be {self.yaw_sign if ok else -self.yaw_sign:+.0f}",
+              flush=True)
 
     def _sign_step(self, t, imu):
         """Pulse an axis and compare the GYRO against the command.
@@ -391,17 +486,24 @@ class ControllerVQ2:
         if not self.servo_state.have_fix:
             return
         verdict = servo.check_polarity(self._yaw_chk, yaw_rate_c,
-                                       self.servo_state.az_rate)
+                                       self.servo_state.az_rate,
+                                       self.servo_state.rng_f)
         if verdict == 0:
             return
         n, wrong = self._yaw_chk.total, self._yaw_chk.wrong
-        if verdict < 0:
+        if verdict > 0:
+            print(f"  [YAW] polarity confirmed ({n - wrong}/{n} samples)",
+                  flush=True)
+        elif YAW_AUTOFLIP:
             self.yaw_sign = -self.yaw_sign
             print(f"  [YAW] steering inverted ({wrong}/{n} samples) -> "
                   f"yaw_sign={self.yaw_sign:+.0f}", flush=True)
         else:
-            print(f"  [YAW] polarity confirmed ({n - wrong}/{n} samples)",
-                  flush=True)
+            # Run 11 flipped mid-flight on confounded close-range data and made
+            # things worse. Report, do not act, until MISSION=yawtest has
+            # settled the convention from a hover.
+            print(f"  [YAW] steering looks INVERTED ({wrong}/{n} samples); "
+                  f"not flipping (YAW_AUTOFLIP=1 to enable)", flush=True)
 
     def _race_step(self, t):
         """Full visual servoing: detect the gate, de-rotate the sighting into

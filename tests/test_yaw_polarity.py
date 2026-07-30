@@ -37,7 +37,7 @@ def fly(plant_inverted, yaw_sign=+1.0):
         applied = cmd * yaw_sign * (-1.0 if plant_inverted else 1.0)
         daz = -applied * 0.02
         az += daz
-        verdict = servo.check_polarity(chk, cmd, daz / 0.02)
+        verdict = servo.check_polarity(chk, cmd, daz / 0.02, 30.0)
         if verdict < 0:
             yaw_sign = -yaw_sign
             flips += 1
@@ -65,10 +65,22 @@ def main():
         applied = cmd * yaw_sign * -1.0          # inverted plant, corrected sign
         daz = -applied * 0.02
         az += daz
-        if servo.check_polarity(chk2, cmd, daz / 0.02) < 0:
+        if servo.check_polarity(chk2, cmd, daz / 0.02, 30.0) < 0:
             yaw_sign = -yaw_sign
     check("flipped sign then converges", abs(az) < 0.05,
           f"|az| settled at {math.degrees(abs(az)):.1f} deg")
+
+    # Close-range evidence must be refused outright: that is what invalidated
+    # run 11's mid-flight flip.
+    near = servo.PolarityCheck()
+    for _ in range(200):
+        servo.check_polarity(near, 1.0, 1.0, 3.7)     # wrong sign, but 3.7 m out
+    check("close-range evidence is refused", near.total == 0 and not near.decided,
+          f"accumulated {near.total} samples at 3.7 m")
+    unknown = servo.PolarityCheck()
+    for _ in range(200):
+        servo.check_polarity(unknown, 1.0, 1.0, None)
+    check("missing range is refused", unknown.total == 0)
 
     print()
     if _fails:

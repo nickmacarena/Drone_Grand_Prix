@@ -782,3 +782,41 @@ is flipped, and the loop then converges (|az| -> 0.0 deg) rather than oscillatin
 Also worth recording: run 10's approach to gate 0 was the best yet — u=322.0,
 v=156.5 dead centre, and it passed with the new lateral control active. The
 approach was never the problem after the PD fix; the departure was.
+
+## VQ2 official run 11 — the polarity check fired, and it was WRONG
+
+    [YAW] steering inverted (11/12 samples) -> yaw_sign=+1
+
+It flipped back to +1 and made the run worse. The verdict cannot be trusted, and
+neither can the run-10 inference that motivated flipping to -1 in the first
+place. Both rest on the same confound:
+
+Bearing rate has two sources, rotation and translation. Translation contributes
+v*sin(az)/r. The check ran at rng=3.7 m with the gate 37 deg off axis at roughly
+8 m/s, giving ~1.3 rad/s from translation alone — about TRIPLE the commanded yaw
+rate. Azimuth was moving because the aircraft was flying past the gate, not
+because it was rotating.
+
+The decisive tell: run 10 flew yaw_sign=+1 and run 11 flew -1, and BOTH show
+azimuth increasing. Both signs cannot be wrong, so azimuth increase was never
+evidence about the sign at all. Six runs of reasoning from race logs, all
+confounded the same way, none of it valid.
+
+The |yaw_cmd| > 0.30 rad/s gate was meant to ensure rotation dominates. It does
+not come close at short range. Added min_range_m = 15.0, and the auto-flip is now
+opt-in (YAW_AUTOFLIP=1) rather than default: acting on confounded data actively
+cost a run.
+
+Rotation and translation only separate when translation is zero, so MISSION=
+yawtest does exactly that: hover in place, no forward tilt, no roll, rotate at
+0.35 rad/s for 6 s, and report how the gate's u moved. A right turn sweeps the
+scene left, so u must DECREASE. Unambiguous, ~12 s, and needs a gate only to be
+seen, not passed.
+
+Separately, run 11 revealed a target-selection problem worth its own fix later:
+right after clearing gate 0 the detector reported u=581 v=59 rng=3.7 — a large
+blob high and right — and the servo climbed at +10 m/s toward it (a_up=+10.18,
+thr=0.39, el ~ +31 deg). The hangar has ceiling-mounted gates (visible in run 6
+frame 0), so "biggest orange blob" can be something well above the course.
+
+Tests: close-range and missing-range evidence are now refused outright.

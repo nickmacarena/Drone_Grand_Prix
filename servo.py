@@ -390,19 +390,30 @@ class PolarityCheck:
 
     # Thresholds: the commanded yaw must dominate the bearing change caused by
     # translation, and there must be a measurable response to judge.
+    #
+    # The range gate is the one that was missing and it invalidated run 11's
+    # verdict. Translation contributes v*sin(az)/r to the bearing rate; at
+    # rng=3.7 m, 37 deg off axis, ~8 m/s that is ~1.3 rad/s, triple the
+    # commanded yaw. Close in, azimuth moves because we are flying past the
+    # gate, so it says nothing about the sign. Only judge from far away.
     min_yaw_rate: float = 0.30
     min_az_rate: float = 0.05
+    min_range_m: float = 15.0
     samples: int = 12
     margin: float = 0.60
 
 
-def check_polarity(chk: PolarityCheck, yaw_cmd: float, az_rate: float) -> int:
+def check_polarity(chk: PolarityCheck, yaw_cmd: float, az_rate: float,
+                   range_m: float | None = None) -> int:
     """Accumulate evidence. Returns -1 to flip, +1 confirmed, 0 undecided.
 
-    Correct steering makes yaw_cmd and d(az)/dt OPPOSITE in sign.
+    Correct steering makes yaw_cmd and d(az)/dt OPPOSITE in sign. Only samples
+    far enough out that rotation, not translation, drives the bearing.
     """
     if chk.decided:
         return 0
+    if range_m is None or not math.isfinite(range_m) or range_m < chk.min_range_m:
+        return 0            # too close: translation swamps rotation
     if abs(yaw_cmd) < chk.min_yaw_rate or abs(az_rate) < chk.min_az_rate:
         return 0            # a zero response would read as "correct"
     chk.total += 1
