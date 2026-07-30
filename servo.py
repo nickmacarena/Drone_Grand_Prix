@@ -45,7 +45,17 @@ class ServoConfig:
     # the gate plane the structure is still beside us, and that is the worst
     # possible moment for a hard turn. Tracking continues throughout — only the
     # steering is held off.
-    clear_gate_s: float = 0.45
+    # Kept SHORT. Elodin (course "vq2turn") shows gate 1's bearing growing from
+    # 42 to 60 deg — outside the 90 deg HFoV — within ~5 m of the gate-0 plane.
+    # At ~7 m/s a 0.45 s inhibit burns 3 m of exactly the window where the next
+    # gate is still visible, so it caused the very loss it was meant to prevent.
+    # The slew limit above is what keeps the turn from snapping; this only needs
+    # to carry us past the gate plane itself.
+    clear_gate_s: float = 0.15
+
+    # Gates can legitimately sit near the FOV edge (gate 1 is ~42 deg off), so
+    # the first sweep must be able to reach past that.
+    hint_max_age_s: float = 2.5      # how long a next-gate hint stays useful
 
     # Vertical: elevation error -> normalized vertical effort.
     # kd_el damps using the MEASURED rate of change of the elevation bearing.
@@ -62,6 +72,18 @@ class ServoConfig:
     # Angles are LEVEL-frame (see bearing.stabilized_bearing), so 0 means
     # "gate at our own altitude" — no dependence on camera mounting tilt.
     el_setpoint_rad: float = 0.0
+
+    # Lateral: roll toward the gate as well as yawing onto it.
+    #
+    # Until now tilt_right was hard 0.0 in every branch — steering was yaw-only,
+    # so direction changes had to wait for the nose to come round and then for
+    # forward tilt to push the new way. Coming out of a turn the aircraft keeps
+    # its old momentum and slides wide: in Elodin "vq2turn" it lined up on gate
+    # 1 perfectly at 6.4 m (az=-0.3 deg) and still crossed the plane 1.0 m off
+    # centre, outside the 0.75 m half-opening. Roll gives crossrange authority
+    # directly instead of via the heading.
+    kp_lat: float = 0.9
+    max_lat: float = 0.35
 
     # Forward drive
     cruise_tilt: float = 0.55        # normalized forward tilt when lined up
@@ -118,7 +140,7 @@ class ServoConfig:
     # Sweep outward from it, alternating and widening, instead of committing to
     # one direction.
     search_yaw_rate: float = 0.55    # rad/s while sweeping
-    sweep_limit_rad: float = 0.61    # first sweep: +/- 35 deg from the prior
+    sweep_limit_rad: float = 1.15    # first sweep: +/- 66 deg from the prior
     sweep_growth: float = 1.6        # widen on each reversal
     sweep_limit_max_rad: float = 3.4 # eventually cover the full circle
     # The camera is pitched 20 deg UP with a 58.7 deg vertical FOV, so nothing
@@ -132,7 +154,13 @@ class ServoConfig:
     # searching and never recovered. So oscillate instead of descending, and
     # spend equal time above the entry altitude, which nets to zero drift.
     search_descend: float = 0.18     # peak vertical effort, either direction
-    search_vert_period_s: float = 2.4  # full down-then-up cycle
+    # Period matters as much as amplitude. At 2.4 s the excursion is only
+    # ~0.65 m, which nets zero drift but cannot find a gate below the FOV's
+    # -9 deg floor — the VQ1 replica descends 8.6 m between gates 1 and 2 and
+    # regressed 6/6 -> 2/6 when this was too short. 6 s gives a several-metre
+    # sweep down (the blind side) and then recovers it. sin() starts negative,
+    # so the DOWN half comes first, which is where gates hide.
+    search_vert_period_s: float = 6.0  # full down-then-up cycle
     search_creep: float = 0.38       # NOT a token creep. Forward tilt pitches
                                      # the nose down, swinging the camera from
                                      # ~9 deg of downward view to ~23 deg. A
@@ -151,6 +179,8 @@ class ServoState:
     az_f: float = 0.0                # smoothed bearing (the working estimate)
     el_f: float = 0.0
     have_fix: bool = False
+    hint_az: float | None = None     # bearing of a SECOND gate seen while
+    hint_t: float = 0.0              # tracking the current one — i.e. the next
     clear_until: float | None = None  # steer-inhibit deadline after a gate pass
     yaw_cmd: float = 0.0             # previous yaw command, for the slew limit
     sweep_pos: float = 0.0           # commanded yaw accumulated while searching
@@ -229,6 +259,13 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
         # different object. Coast on the track instead of jumping to it.
         usable = False
         state.rejected += 1
+        # A confident sighting that is NOT the gate we are tracking is, most
+        # often, the NEXT gate. Runs 7-9 all saw gate 1 this way while still
+        # locked on gate 0 (u=509..609, conf 0.74-1.00) and threw it away, then
+        # had no idea which way to turn once gate 0 was behind them.
+        if obs.confidence >= cfg.acquire_confidence:
+            state.hint_az = obs.az
+            state.hint_t = t
         if state.rejecting_since is None:
             state.rejecting_since = t
         elif t - state.rejecting_since > cfg.reject_timeout_s:
@@ -288,9 +325,12 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
             drive *= cfg.hold_drive_decay
         else:
             drive *= max(cfg.min_tilt_frac, confidence)
+        lateral = clamp(cfg.kp_lat * state.az_f, -cfg.max_lat, cfg.max_lat)
+        if state.clear_until is not None and t < state.clear_until:
+            lateral = 0.0          # not while the gate structure is alongside
         return ServoOutput(
             tilt_fwd=cfg.cruise_tilt * drive,
-            tilt_right=0.0,
+            tilt_right=lateral,
             vertical=vertical,
             yaw_rate=yaw_rate,
             have_target=True,
@@ -345,12 +385,19 @@ def gate_passed(state: ServoState, t: float | None = None,
     state.el_f = 0.0
     state.az_rate = 0.0
     state.el_rate = 0.0
-    state.last_az = 0.0
     state.t_last_accept = None
     state.rejecting_since = None
     state.searching = False          # forces a fresh, re-centred sweep
     state.sweep_pos = 0.0
     state.sweep_limit = None
     state.search_t = 0.0
+    c = cfg or ServoConfig()
+    # Head toward the next-gate hint if we have a fresh one; otherwise keep the
+    # last bearing we saw. Zeroing this (as the first version did) destroys the
+    # only clue we have about which way the course turns.
+    if (state.hint_az is not None and t is not None
+            and t - state.hint_t <= c.hint_max_age_s):
+        state.last_az = state.hint_az
+    state.hint_az = None
     if t is not None:
-        state.clear_until = t + (cfg or ServoConfig()).clear_gate_s
+        state.clear_until = t + c.clear_gate_s

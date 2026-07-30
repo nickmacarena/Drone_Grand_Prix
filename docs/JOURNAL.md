@@ -683,3 +683,59 @@ within the limit, and that it still does turn (settles at +1.47 rad/s).
 
 Course knowledge gained: gate 0 sits ~2.4 m above the start pad, and gate 1 is
 roughly 15 m from gate 0 at about 42 deg to the right.
+
+## VQ2 official run 9 + the fix found offline: lateral control and the next-gate hint
+
+Run 9 cleared gate 0 (third consecutive run) and the slew limit measurably
+worked — the post-gate yaw jump fell from +44 deg/interval (run 8) to
++12 deg/interval. But the outcome was identical: yaw ran to +154, it sank, it
+inverted. Nick, correctly: "What did you change? I see no improvement."
+
+Fair. Changing one parameter per five-minute run and inferring from logs is the
+exact loop this project rejected at the start. So the course geometry we had
+measured got rebuilt in Elodin as course "vq2turn" (gate 0 at +2.4 m and 12 m
+out; gate 1 at 15 m, 42 deg right; two further turns), and everything below was
+found offline in 90-second runs with ground truth.
+
+Findings that the official logs could not have given us:
+
+1. GATE 1 IS ONLY VISIBLE FOR ABOUT TWO METRES. At the gate-0 plane its
+   bearing is 41.8 deg, just inside the 45 deg half-FOV. Five metres later it is
+   at 59.6 deg — outside the cone. The window is tiny and closes fast.
+
+2. clear_gate_s = 0.45 WAS CAUSING THE LOSS IT WAS MEANT TO PREVENT. At ~7 m/s
+   it inhibits steering for 3 m, i.e. exactly the metres where gate 1 is still
+   visible. Cut to 0.15 s; the slew limit is what keeps the turn smooth.
+
+3. THE HARNESS WAS TESTING DIFFERENT CODE. elodin_servo never called
+   gate_passed(), and its synthetic detector projected only the ACTIVE gate, so
+   it could not reproduce either target-hopping or next-gate glimpses. It now
+   projects every gate and returns the widest in frame, which is what the real
+   detector does (biggest orange blob, no notion of "active").
+
+4. THE NEXT-GATE HINT. Runs 7, 8 and 9 all saw gate 1 while still tracking gate
+   0 (u=509..609, conf 0.74-1.00). The continuity gate correctly rejected those
+   as not-gate-0 and then DISCARDED them. Now a confident rejected sighting is
+   stored as hint_az, and gate_passed() steers the new search toward it.
+   Also stopped zeroing last_az on a gate pass — that destroyed the only clue
+   available about which way the course turns.
+
+5. THE REAL MISS CAUSE: NO LATERAL CONTROL. tilt_right was hard 0.0 in every
+   branch, so direction changes waited on the nose coming round and then on
+   forward tilt pushing the new way. Coming off a turn the aircraft keeps its
+   old momentum and slides wide: it lined up on gate 1 perfectly at 6.4 m
+   (az = -0.3 deg) and still crossed the plane 1.0 m off centre, outside the
+   0.75 m half-opening. Added kp_lat 0.9 / max_lat 0.35 (suppressed during the
+   gate-clearance window). That single change took vq2turn from 1/4 to 4/4.
+
+6. A REGRESSION CAUGHT AND FIXED. The oscillating vertical search from run 7
+   had period 2.4 s, which displaces only ~0.65 m — fine for not sinking, but
+   it removed the ability to find gates BELOW the FOV's -9 deg floor. VQ1
+   replica went 6/6 -> 2/6. Period 6.0 s gives a several-metre sweep down (the
+   blind side comes first, since sin() starts negative) and recovers it, netting
+   zero drift. Both courses now pass.
+
+Elodin state: vq1 6/6 COMPLETE 55.85 s; vq2turn 4/4 COMPLETE 19.23 s.
+
+The vq2turn course lives in the local elodin clone (sim/course.py), which is not
+in this repo. Definition is reproduced in the entry above so it can be rebuilt.

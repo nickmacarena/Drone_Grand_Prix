@@ -73,7 +73,15 @@ def reset_state() -> None:
 
 
 def _detect(update: SensorUpdate):
-    """Stand-in for the camera: project the active gate, optionally degraded."""
+    """Stand-in for the camera.
+
+    Projects EVERY gate and returns the widest one in frame, because that is
+    what the real detector does — it reports the biggest orange blob, with no
+    notion of which gate is "active". Projecting only the active gate hid two
+    behaviours that dominate the official runs: the servo latching onto a gate
+    that is not its target, and (usefully) glimpsing the NEXT gate while still
+    flying the current one. The hint mechanism is invisible without this.
+    """
     idx = int(update.next_gate_index)
     if not (0 <= idx < len(GATES)):
         return None
@@ -83,7 +91,14 @@ def _detect(update: SensorUpdate):
     pos = (float(update.world_pos[4]), float(update.world_pos[5]),
            float(update.world_pos[6]))
 
-    obs = observe_from_truth(ELODIN_CAM, q_true, pos, GATES[idx])
+    best = None
+    for g in GATES:
+        cand = observe_from_truth(ELODIN_CAM, q_true, pos, g)
+        if cand is None:
+            continue
+        if best is None or cand.width_px > best.width_px:
+            best = cand
+    obs = best
     if obs is None:
         return None
     if DROP_RATE > 0.0 and _rng.random() < DROP_RATE:
@@ -96,8 +111,18 @@ def _detect(update: SensorUpdate):
     return obs
 
 
+_last_idx = [None]
+
+
 def autopilot(update: SensorUpdate) -> RCCommand:
     t = update.t
+
+    # Same progress signal the official sim gives us, handled the same way.
+    idx_now = int(update.next_gate_index)
+    if _last_idx[0] is not None and idx_now != _last_idx[0]:
+        servo.gate_passed(_servo_state, t, _servo_cfg)
+        _last_obs[0] = None
+    _last_idx[0] = idx_now
 
     # ── Attitude from the IMU alone ─────────────────────────────────────
     estimator.update(_est, _est_cfg, t,

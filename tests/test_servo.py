@@ -296,7 +296,11 @@ def test_gate_passed_clears_stale_track():
     check("track exists before pass", st.have_fix)
     servo.gate_passed(st)
     check("track cleared by gate pass", not st.have_fix)
-    check("bearing prior re-centred", st.az_f == 0.0 and st.last_az == 0.0)
+    check("smoothed bearing cleared", st.az_f == 0.0)
+    # last_az is deliberately NOT zeroed: it (or a fresher next-gate hint) is
+    # the only clue we have about which way the course turns. Runs 7-9 lost
+    # gate 1 partly because this was thrown away.
+    check("search prior retained for the next leg", st.last_az != 0.0)
 
 
 def test_no_slam_after_gate_pass():
