@@ -425,6 +425,50 @@ def check_polarity(chk: PolarityCheck, yaw_cmd: float, az_rate: float,
     return -1 if (chk.wrong / chk.total) >= chk.margin else +1
 
 
+def yaw_convention(samples, fx: float = 320.0, cx: float = 320.0,
+                   min_span_deg: float = 5.0, min_samples: int = 6,
+                   tol: float = 0.5):
+    """Regress the gate's BEARING against yaw over a pure rotation.
+
+    `samples` is [(yaw_rad, u_px), ...] gathered while rotating in place with no
+    translation (controller_vq2 MISSION=yawtest). Returns
+    (verdict, slope, span_deg, note), verdict being:
+        "standard"     slope ~ -1: rotating right sweeps the scene left
+        "inverted"     slope ~ +1
+        "inconclusive" too few points, too little rotation, or a slope whose
+                       MAGNITUDE is wrong — i.e. something other than rotation
+                       moved the gate
+
+    Regressing bearing rather than raw pixels is what makes the magnitude test
+    meaningful: u = cx + fx*tan(bearing) is nonlinear, so du/dyaw depends on how
+    far round you turned (-320 px/rad near centre, -487 across 60 deg), and no
+    fixed pixel tolerance can be right for every span. In bearing space pure
+    rotation gives exactly -1 whatever the span.
+
+    The magnitude test matters more than the sign. A gate close enough to fill
+    the frame has its centroid pinned by the frame edges and barely moves under
+    rotation: the first offline attempt at this returned a confident "standard"
+    from one pair in which 37.7 deg of yaw moved u by 2.9 px, where rotation
+    demands ~247. The sign was right and the datum was still worthless.
+    """
+    if len(samples) < min_samples:
+        return "inconclusive", 0.0, 0.0, f"only {len(samples)} sightings"
+    ys = [p[0] for p in samples]
+    bs = [math.atan2((p[1] - cx) / fx, 1.0) for p in samples]
+    n = len(samples)
+    my, mb = sum(ys) / n, sum(bs) / n
+    sxx = sum((y - my) ** 2 for y in ys)
+    span = math.degrees(max(ys) - min(ys))
+    if sxx < 1e-9 or span < min_span_deg:
+        return "inconclusive", 0.0, span, f"yaw only moved {span:.1f} deg"
+    slope = sum((y - my) * (b - mb) for y, b in zip(ys, bs)) / sxx
+    if abs(abs(slope) - 1.0) > tol:
+        return ("inconclusive", slope, span,
+                f"|d(bearing)/d(yaw)| = {abs(slope):.2f}, expected ~1.0; "
+                f"something other than rotation moved the gate")
+    return ("standard" if slope < 0 else "inverted"), slope, span, ""
+
+
 def gate_passed(state: ServoState, t: float | None = None,
                 cfg: ServoConfig | None = None) -> None:
     """Called when the sim's active_gate_index advances.

@@ -820,3 +820,43 @@ thr=0.39, el ~ +31 deg). The hangar has ceiling-mounted gates (visible in run 6
 frame 0), so "biggest orange blob" can be something well above the course.
 
 Tests: close-range and missing-range evidence are now refused outright.
+
+## MISSION=yawtest attempt 1 failed, attempt 2 rebuilt; offline measurement rejected
+
+Attempt 1 produced no verdict, for a dull reason: it applied hover thrust while
+parked on the 17.8 deg nose-down ramp. At exactly hover the aircraft barely
+unsticks, and that attitude supplies g*sin(17.8) ~ 3 m/s^2 of FORWARD
+acceleration, so it slid off the ramp into gate 0 (rng 5.6 -> 2.2 -> 0.8,
+a_up=-14.66) before the rotation phase began. Yaw moved 2.4 deg in total.
+
+An offline attempt using run 6's frames + gyro sidecar found exactly ONE usable
+pair and reported "STANDARD". Rejected it: 37.7 deg of claimed rotation moved u
+by 2.9 px, where pure rotation demands ~247. That pair is a 376 px blob filling
+the frame, whose centroid is pinned by the frame edges and cannot register
+rotation. The sign was right and the datum was still worthless — a good reminder
+that a plausible sign with an impossible magnitude is not evidence.
+
+Attempt 2:
+  * lift (thrust 0.33, 1.2 s) -> matched reverse pulse (2*hover - 0.33, 1.2 s,
+    which is the only way to arrest a climb without velocity feedback) ->
+    settle -> rotate 6 s. Ends ~4.7 m up with vz ~ 0, clear of gate 0's 3.2 m top.
+  * Regresses over the WHOLE rotation instead of comparing two endpoints.
+  * Regression moved into servo.yaw_convention() — third time logic like this
+    turned out to need pymavlink/numpy stubs to test, which each time meant it
+    was in the wrong module.
+
+Regressing BEARING, not raw pixels: u = cx + fx*tan(bearing) is nonlinear, so
+du/dyaw is -320 px/rad near centre but -487 across 60 deg, and no fixed pixel
+tolerance is right for every span. In bearing space pure rotation gives exactly
+-1.00 regardless of span (verified at 20, 60 and 100 deg). The magnitude test is
+what rejects pinned-centroid data, and it matters more than the sign.
+
+Tests cover: standard, inverted, pinned centroid (refused), no rotation
+(refused), too few samples (refused), and span independence. One synthetic case
+initially failed at 100 deg span because the generator emitted u values outside
+the 640 px frame — unphysical, since a gate leaves the 90 deg HFoV partway
+through such a turn. Fixed by dropping invisible samples, as reality does.
+
+STILL UNKNOWN: the actual yaw convention. Six race runs of inference were all
+confounded, the offline attempt was rejected, and yawtest attempt 1 never
+rotated. YAW_SIGN remains -1.0 and is NOT trusted.

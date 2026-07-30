@@ -82,6 +82,51 @@ def main():
         servo.check_polarity(unknown, 1.0, 1.0, None)
     check("missing range is refused", unknown.total == 0)
 
+    # ── servo.yaw_convention: the MISSION=yawtest measurement ──────────
+    def synth(standard, n=40, span_deg=60.0, fx=320.0):
+        """Gate fixed in the world, drone rotating: u = cx + fx*tan(bearing).
+
+        Samples outside the 640 px frame are dropped, because the camera cannot
+        report them — over a 100 deg rotation a gate leaves the 90 deg HFoV
+        partway through, so only the visible part is available to regress.
+        """
+        pts = []
+        for k in range(n):
+            yaw = math.radians(span_deg) * k / (n - 1)
+            bearing = -yaw if standard else +yaw   # right turn sweeps scene left
+            u = 320.0 + fx * math.tan(bearing)
+            if 0.0 <= u < 640.0:
+                pts.append((yaw, u))
+        return pts
+
+    # Span-independence is the point of working in bearing space.
+    for span_deg in (20.0, 60.0, 100.0):
+        v, slope, _, note = servo.yaw_convention(synth(True, span_deg=span_deg))
+        check(f"standard at {span_deg:.0f} deg span", v == "standard",
+              f"slope={slope:+.2f} {note}")
+
+    v, slope, span, _ = servo.yaw_convention(synth(True))
+    check("standard rotation reads standard", v == "standard",
+          f"verdict={v} slope={slope:+.2f} over {span:.0f} deg")
+    v, slope, _, _ = servo.yaw_convention(synth(False))
+    check("inverted rotation reads inverted", v == "inverted",
+          f"verdict={v} slope={slope:+.2f}")
+
+    # The failure that fooled the first offline attempt: a gate close enough to
+    # fill the frame has its centroid pinned, so 37.7 deg of yaw moved u by
+    # 2.9 px where pure rotation demands ~247. The SIGN was right; believing it
+    # would still have been wrong.
+    pinned = [(math.radians(60.0) * k / 39, 320.0 - 0.077 * k) for k in range(40)]
+    v, slope, _, note = servo.yaw_convention(pinned)
+    check("pinned-centroid data is refused", v == "inconclusive",
+          f"slope {slope:+.2f} — {note}")
+
+    v, _, _, note = servo.yaw_convention(
+        [(math.radians(0.05) * k, 320.0 - 2.0 * k) for k in range(40)])
+    check("no-rotation data is refused", v == "inconclusive", note)
+    v, _, _, note = servo.yaw_convention([(0.0, 320.0)])
+    check("too few sightings refused", v == "inconclusive", note)
+
     print()
     if _fails:
         print(f"RESULT: FAIL — {', '.join(_fails)}")

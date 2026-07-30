@@ -87,7 +87,10 @@ YAW_AUTOFLIP = os.environ.get("YAW_AUTOFLIP", "0") == "1"
 
 YAWTEST_RATE = 0.35        # rad/s — slow, so the gate stays in frame
 YAWTEST_S = 6.0            # rotate for this long
-YAWTEST_SETTLE_S = 3.0     # hold still first, to fix the starting bearing
+YAWTEST_SETTLE_S = 1.0     # hold still before rotating
+YAWTEST_CLIMB_S = 1.2      # lift, then an equal reverse pulse to stop climbing
+YAWTEST_CLIMB_THRUST = 0.33
+CAM_FX_PX = 320.0          # du/dyaw for pure rotation is -fx
 
 # ── Calibration ──────────────────────────────────────────────────────
 CAL_THRUST = 0.30         # gentler than VQ1's 0.35: every m/s of climb
@@ -174,10 +177,7 @@ class ControllerVQ2:
         self._last_gate_index = None
         self._yaw_chk = servo.PolarityCheck()
         self._yawtest_t0 = None
-        self._yawtest_u0 = None
-        self._yawtest_yaw0 = 0.0
-        self._yawtest_last_u = None
-        self._yawtest_last_yaw = 0.0
+        self._yawtest_samples = []
         self._yawtest_done = False
         self.servo_cfg = servo.ServoConfig()
 
@@ -305,29 +305,31 @@ class ControllerVQ2:
         """Measure the yaw convention directly, with translation removed.
 
         Six runs were spent inferring this from race logs and every inference was
-        confounded the same way. At the ranges where it mattered (rng 1-4 m,
-        gate 30-40 deg off axis, ~8 m/s), the bearing rate caused by TRANSLATION
-        is v*sin(az)/r ~ 1.3 rad/s — triple the commanded yaw rate. Azimuth was
-        moving because we were flying past the gate, not because we were
-        rotating, so it carried almost no information about the sign. Runs 10 and
-        11 flew opposite signs and BOTH showed azimuth increasing, which is the
-        proof that the measurement was meaningless.
+        confounded identically: at the ranges that mattered (1-4 m, 30-40 deg off
+        axis, ~8 m/s) the bearing rate from TRANSLATION is v*sin(az)/r ~ 1.3
+        rad/s, triple the commanded yaw. Runs 10 and 11 flew opposite signs and
+        BOTH showed azimuth increasing — proof the measurement said nothing.
 
-        Rotation and translation separate only when translation is zero. So:
-        hover in place, no forward tilt, no roll, and rotate slowly. Then du/dt
-        is purely rotational and the convention is unambiguous.
+        Attempt 1 of this test also failed, for a duller reason: it applied hover
+        thrust while parked on the 17.8 deg nose-down ramp. At exactly hover it
+        barely unsticks, and the ramp attitude supplies g*sin(17.8) ~ 3 m/s2 of
+        FORWARD acceleration, so it slid into gate 0 before rotating.
 
-        Run with MISSION=yawtest. Takes about 12 s and does not need a gate to be
-        passed, only seen.
+        So: lift off deliberately, cancel the climb with a matched reverse pulse
+        (the only way to stop without velocity feedback), settle, then rotate —
+        and regress u against yaw over the whole rotation rather than comparing
+        two endpoints. The slope is the answer AND its own sanity check: pure
+        rotation must give du/dyaw ~ -fx = -320 px/rad. A slope far from that
+        magnitude means something other than rotation moved the gate, and the
+        result should be discarded rather than believed.
         """
         if self._yawtest_t0 is None:
             self._yawtest_t0 = t
-            print(f"  [YAWTEST] hovering, commanding yaw {YAWTEST_RATE:+.2f} "
-                  f"rad/s for {YAWTEST_S}s. No forward tilt: any u movement is "
-                  f"rotation only.", flush=True)
-        elapsed = t - self._yawtest_t0
+            print(f"  [YAWTEST] lift {YAWTEST_CLIMB_S}s, arrest "
+                  f"{YAWTEST_CLIMB_S}s, settle {YAWTEST_SETTLE_S}s, then yaw "
+                  f"{YAWTEST_RATE:+.2f} rad/s for {YAWTEST_S}s", flush=True)
+        e = t - self._yawtest_t0
 
-        # Observe the gate, but do not act on it.
         frame = self.shared.latest_frame
         if frame is not None and frame is not self._last_frame_seen:
             self._last_frame_seen = frame
@@ -338,172 +340,44 @@ class ControllerVQ2:
         obs = self._last_obs
         _, _, yaw_est = self._est_euler()
 
-        if elapsed < YAWTEST_SETTLE_S:
-            if obs is not None:                  # record the starting point
-                self._yawtest_u0 = obs.u
-                self._yawtest_yaw0 = yaw_est
-            return 0.0, 0.0, 0.0, self._damped_hover()
+        t_arrest = YAWTEST_CLIMB_S
+        t_settle = t_arrest + YAWTEST_CLIMB_S
+        t_spin = t_settle + YAWTEST_SETTLE_S
+        t_end = t_spin + YAWTEST_S
 
-        if elapsed < YAWTEST_SETTLE_S + YAWTEST_S:
-            if obs is not None and self._yawtest_u0 is not None:
-                self._yawtest_last_u = obs.u
-                self._yawtest_last_yaw = yaw_est
-            # Pure rotation: hover thrust, level, commanded yaw only.
-            return 0.0, 0.0, YAWTEST_RATE, self._damped_hover()
+        if e < t_arrest:                    # unstick from the ramp and level
+            return 0.0, 0.0, 0.0, YAWTEST_CLIMB_THRUST
+        if e < t_settle:                    # matched reverse pulse: vz -> ~0
+            return 0.0, 0.0, 0.0, max(0.0, 2.0 * self.hover - YAWTEST_CLIMB_THRUST)
+        if e < t_spin:                      # hold still, fix the start bearing
+            return 0.0, 0.0, 0.0, self.hover
+        if e < t_end:
+            if obs is not None and obs.confidence >= 0.5:
+                self._yawtest_samples.append((yaw_est, obs.u, obs.width_px))
+            return 0.0, 0.0, YAWTEST_RATE, self.hover
 
         if not self._yawtest_done:
             self._yawtest_done = True
             self._report_yaw_test()
-        return 0.0, 0.0, 0.0, self._damped_hover()
+        return 0.0, 0.0, 0.0, self.hover
 
     def _report_yaw_test(self):
-        """State the convention plainly, with the numbers behind it."""
-        u0, u1 = self._yawtest_u0, self._yawtest_last_u
-        if u0 is None or u1 is None:
-            print("  [YAWTEST] no gate held in view — point the drone at a gate "
-                  "and rerun", flush=True)
+        """Report the measured convention (regression lives in servo)."""
+        pts = [(y, u) for y, u, _w in self._yawtest_samples]
+        verdict, slope, span, note = servo.yaw_convention(pts, fx=CAM_FX_PX)
+        print(f"  [YAWTEST] {len(pts)} sightings, yaw spanned {span:.1f} deg, "
+              f"applied {self.rate_sign[2] * self.yaw_sign * YAWTEST_RATE:+.2f} "
+              f"rad/s", flush=True)
+        if verdict == "inconclusive":
+            print(f"  [YAWTEST] INCONCLUSIVE: {note}. Do not change YAW_SIGN "
+                  f"on this.", flush=True)
             return
-        du = u1 - u0
-        dyaw = math.degrees(self._yawtest_last_yaw - self._yawtest_yaw0)
-        # Commanding +yaw_rate through the current sign chain produced this
-        # rotation. Correct convention: a RIGHT turn sweeps the scene LEFT, so
-        # the gate's u must DECREASE.
-        applied = self.rate_sign[2] * self.yaw_sign * YAWTEST_RATE
-        want = "decrease" if applied > 0 else "increase"
-        got = "decrease" if du < 0 else "increase"
-        ok = (want == got)
-        print(f"  [YAWTEST] commanded {YAWTEST_RATE:+.2f} rad/s "
-              f"(applied {applied:+.2f} after rate_sign*yaw_sign)", flush=True)
-        print(f"  [YAWTEST] gate u {u0:.1f} -> {u1:.1f}  (du={du:+.1f} px), "
-              f"gyro yaw moved {dyaw:+.1f} deg", flush=True)
-        print(f"  [YAWTEST] expected u to {want}, saw it {got} -> "
-              f"{'CORRECT' if ok else 'INVERTED'}: "
-              f"YAW_SIGN should be {self.yaw_sign if ok else -self.yaw_sign:+.0f}",
-              flush=True)
-
-    def _sign_step(self, t, imu):
-        """Pulse an axis and compare the GYRO against the command.
-
-        Alternates pulse / rest so each axis is measured from a calm start and
-        the aircraft is never left rotating.
-        """
-        if self._sign_t0 is None:
-            self._sign_t0 = t
-            self._sign_samples = []
-            self._sign_resting = False
-            pulse = [0.0, 0.0, 0.0]
-            pulse[self._sign_axis] = SIGN_PULSE_RATE
-            self._direct_rates = tuple(pulse)
-            print(f"  [SIGN] pulsing axis {self._sign_axis}", flush=True)
-
-        elapsed = t - self._sign_t0
-
-        if not self._sign_resting:
-            if imu is not None:
-                self._sign_samples.append(
-                    (imu.gx, imu.gy, imu.gz)[self._sign_axis])
-            if elapsed >= SIGN_PULSE_S:
-                n = len(self._sign_samples)
-                measured = sum(self._sign_samples) / n if n else 0.0
-                if abs(measured) >= SIGN_MIN_GYRO:
-                    self.rate_sign[self._sign_axis] = 1.0 if measured > 0 else -1.0
-                    verdict = f"{self.rate_sign[self._sign_axis]:+.0f}"
-                else:
-                    verdict = "no response, keeping default"
-                print(f"  [SIGN] axis {self._sign_axis}: commanded "
-                      f"{SIGN_PULSE_RATE:+.2f} -> gyro {measured:+.3f} rad/s "
-                      f"({n} samples) -> {verdict}", flush=True)
-                # Rest: zero rates, let the axis stop before the next test.
-                self._sign_resting = True
-                self._direct_rates = (0.0, 0.0, 0.0)
-            return 0.0, 0.0, 0.0, self._damped_hover()
-
-        if elapsed >= SIGN_PULSE_S + SIGN_SETTLE_S:
-            self._sign_axis += 1
-            self._sign_t0 = None
-            if self._sign_axis >= 3:
-                self._signs_done = True
-                self._direct_rates = None
-                print(f"  [SIGN] done: {self.rate_sign}", flush=True)
-        return 0.0, 0.0, 0.0, self._damped_hover()
-
-    def _calibrate(self, t, imu):
-        if self._cal_t0 is None:
-            self._cal_t0 = t
-            self.vz_est = 0.0          # at rest on the pad: a known zero
-            print(f"  [CAL] thrust={CAL_THRUST} for {CAL_DURATION_S}s "
-                  f"(vertical accel from IMU - VQ2 has no velocity)", flush=True)
-
-        elapsed = t - self._cal_t0
-        if elapsed > CAL_SKIP_S:
-            self._cal_samples.append(self._vertical_accel(imu))
-
-        if elapsed >= CAL_DURATION_S:
-            n = len(self._cal_samples)
-            a_up = sum(self._cal_samples) / n if n else 0.0
-            self.hover = _clamp(CAL_THRUST * G / max(a_up + G, 1.0),
-                                HOVER_MIN, HOVER_MAX)
-            print(f"  [CAL] a_up={a_up:+.2f} m/s^2 over {n} samples "
-                  f"-> hover={self.hover:.3f}", flush=True)
-        return 0.0, 0.0, 0.0, CAL_THRUST
-
-    def _integrate_vz(self, t, imu):
-        if self._vz_last_t is None:
-            self._vz_last_t = t
-            return
-        dt = t - self._vz_last_t
-        self._vz_last_t = t
-        if dt <= 0.0 or dt > 0.2:
-            return
-        self.vz_est += self._vertical_accel(imu) * dt
-        self.vz_est *= max(0.0, 1.0 - VZ_LEAK_PER_S * dt)
-
-    def _damped_hover(self) -> float:
-        """Hover thrust, minus whatever it takes to kill vertical speed.
-
-        Only valid while `vz_est` is a fresh transient (see VZ_DAMP_AFTER_SETTLE).
-        """
-        if self._settled and not VZ_DAMP_AFTER_SETTLE:
-            return _clamp(self.hover, THRUST_MIN, THRUST_MAX)
-        return _clamp(self.hover - VZ_DAMP * self.vz_est, THRUST_MIN, THRUST_MAX)
-
-    def _vertical_accel(self, imu) -> float:
-        """Kinematic acceleration along world UP, from the IMU alone.
-
-        The accelerometer reads specific force f = a - g in the body frame.
-        Rotating into the world and adding gravity back recovers a; its
-        component along UP is what hover calibration needs.
-        """
-        f_world = quat_rotate(self.est.q, (imu.ax, imu.ay, imu.az))
-        g_world = (-G * self.up_world[0], -G * self.up_world[1], -G * self.up_world[2])
-        a_world = (f_world[0] + g_world[0], f_world[1] + g_world[1],
-                   f_world[2] + g_world[2])
-        return (a_world[0] * self.up_world[0] + a_world[1] * self.up_world[1]
-                + a_world[2] * self.up_world[2])
-
-    def _check_yaw_polarity(self, yaw_rate_c: float) -> None:
-        """Flip yaw_sign if flight data says steering is inverted (see servo)."""
-        if not self.servo_state.have_fix:
-            return
-        verdict = servo.check_polarity(self._yaw_chk, yaw_rate_c,
-                                       self.servo_state.az_rate,
-                                       self.servo_state.rng_f)
-        if verdict == 0:
-            return
-        n, wrong = self._yaw_chk.total, self._yaw_chk.wrong
-        if verdict > 0:
-            print(f"  [YAW] polarity confirmed ({n - wrong}/{n} samples)",
-                  flush=True)
-        elif YAW_AUTOFLIP:
-            self.yaw_sign = -self.yaw_sign
-            print(f"  [YAW] steering inverted ({wrong}/{n} samples) -> "
-                  f"yaw_sign={self.yaw_sign:+.0f}", flush=True)
-        else:
-            # Run 11 flipped mid-flight on confounded close-range data and made
-            # things worse. Report, do not act, until MISSION=yawtest has
-            # settled the convention from a hover.
-            print(f"  [YAW] steering looks INVERTED ({wrong}/{n} samples); "
-                  f"not flipping (YAW_AUTOFLIP=1 to enable)", flush=True)
+        print(f"  [YAWTEST] d(bearing)/d(yaw) = {slope:+.2f} "
+              f"(pure rotation gives -1.00)", flush=True)
+        want = self.yaw_sign if verdict == "standard" else -self.yaw_sign
+        print(f"  [YAWTEST] gyro/image convention is {verdict.upper()} "
+              f"=> YAW_SIGN should be {want:+.0f} "
+              f"(currently {self.yaw_sign:+.0f})", flush=True)
 
     def _race_step(self, t):
         """Full visual servoing: detect the gate, de-rotate the sighting into
