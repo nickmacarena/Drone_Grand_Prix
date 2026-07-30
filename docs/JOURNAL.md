@@ -1123,3 +1123,45 @@ clearance, because widening it only loses the next gate. Comment in servo.py now
 records the measurement so it is not retried.
 
 Both courses restored: vq1 6/6 58.96s, vq2turn 4/4 24.92s.
+
+## VQ2 official run 17 — the telemetry paid for itself immediately
+
+TRK confirmed two fixes are working and exposed two new bugs. This is the first
+run diagnosed from data rather than inference.
+
+WORKING:
+  * The continuity gate held gate 0 cleanly and rejected the mid-approach
+    impostor: TRK az +0.4 -> +0.1 -> +0.9, rng 5.6 -> 4.0 -> 1.1, rej=1 while DET
+    was reporting u=487 rng=6.1. Exactly the intended behaviour, and previously
+    unobservable.
+  * The elevation cut refused the v=40.8 sighting right after the pass (fix=n).
+
+NEW BUG 1 — BRAKING LATCHED ON PERMANENTLY.
+    TRK az=+29.9 el=+24.6 rng=14.5 fix=Y rej=15  BRK
+    TRK az=-32.4 el=+28.1 rng= 1.1 fix=Y rej=24  BRK
+    TRK az=-35.2 el=+56.8 rng= 0.9 fix=Y rej=24  BRK
+BRK appears on every line after the pass. The target hopped between +-30 deg so
+|az_f| never fell below brake_az_rad, and the aircraft held 30 deg nose-up while
+the elevation channel commanded thr=0.39 max climb. Nose-up plus max climb with a
+tilted thrust vector is a departure, not a turn. Braking is a TRANSIENT and was
+written as though it were a flight mode.
+Fix: brake_max_s = 0.7 s of continuous braking, then fly again regardless; and
+brake_vert_clamp = 0.25 caps climb authority while nose-up. Test asserts braking
+occupies under 35% of a 4 s window with a target pinned off-axis (measured 18%)
+and that |vertical| stays inside the clamp.
+
+NEW BUG 2 — THE ELEVATION CUT WAS TOO LOOSE. 25 deg admitted sightings at +24.6
+and +28.1 deg, one of which was then tracked to +56.8 deg. Gate 0 reads +14.0 deg
+at the gun (now measurable on the TRK line), so the cut is 18 deg. Test asserts
+run 17's +24.6 deg sighting no longer acquires while gate 0's +14 deg still does.
+
+Also visible and not yet addressed: rej went 15 -> 24 within a second and az
+flipped +29.9 -> -32.4, i.e. reject_timeout_s is dropping the track and
+re-acquiring on the opposite side. The tracker is thrashing in an environment full
+of gates. A track that has been rejecting for 0.7 s currently gets discarded; it
+may be better to keep coasting on it than to hand the aircraft to whatever is
+brightest.
+
+Elodin, both courses improved (braking no longer latching costs less time):
+    vq1      6/6  57.49s  (was 58.96)
+    vq2turn  4/4  21.13s  (was 24.92)

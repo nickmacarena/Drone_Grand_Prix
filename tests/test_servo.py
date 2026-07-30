@@ -132,6 +132,7 @@ def main():
         check(name, ok, f"closest approach {best:.2f} m")
 
     print("\n[target selection — official runs 13/15 regression]")
+    test_braking_is_bounded()
     test_ceiling_gate_not_acquired()
 
     print("\n[post-gate handling — official run 8 regression]")
@@ -350,6 +351,38 @@ def test_no_slam_after_gate_pass():
           f"yaw settled at {out.yaw_rate:+.2f} rad/s")
 
 
+def test_braking_is_bounded():
+    """Braking is a transient, not a flight mode (official run 17).
+
+    Run 17 held BRK on every log line after passing gate 0: the target hopped
+    +-30 deg so |az_f| never fell under the threshold, and the aircraft sat at
+    30 deg nose-up while the elevation channel asked for max climb. That
+    combination departs controlled flight.
+    """
+    cfg = servo.ServoConfig()
+    st = servo.ServoState()
+    # A gate stuck far off axis and high — exactly run 17's situation.
+    tgt = servo.Target(az=math.radians(32.0), el=math.radians(16.0),
+                       confidence=1.0, range_m=14.0)
+    dt = 0.02
+    braking_samples = 0
+    worst_vert_while_braking = 0.0
+    n = int(4.0 / dt)
+    for i in range(n):
+        out = servo.step(st, cfg, i * dt, tgt)
+        if out.braking:
+            braking_samples += 1
+            worst_vert_while_braking = max(worst_vert_while_braking,
+                                           abs(out.vertical))
+    frac = braking_samples / n
+    check("braking does not latch on forever", frac < 0.35,
+          f"braking on {frac:.0%} of 4 s")
+    check("climb is clamped while braking",
+          worst_vert_while_braking <= cfg.brake_vert_clamp + 1e-9,
+          f"peak |vertical| {worst_vert_while_braking:.2f} "
+          f"(clamp {cfg.brake_vert_clamp})")
+
+
 def test_ceiling_gate_not_acquired():
     """Do not start a track on a gate far above the course (runs 13 and 15).
 
@@ -366,6 +399,12 @@ def test_ceiling_gate_not_acquired():
                                           confidence=1.0, range_m=20.0))
     check("ceiling gate does not acquire", not st.have_fix,
           "el=45 deg, conf=1.0")
+
+    # Run 17 acquired at +24.6 and +28.1 deg, which the old 25 deg cut allowed.
+    st2 = servo.ServoState()
+    servo.step(st2, cfg, 0.0, servo.Target(az=0.0, el=math.radians(24.6),
+                                           confidence=1.0, range_m=14.5))
+    check("run 17's +24.6 deg sighting no longer acquires", not st2.have_fix)
 
     st = servo.ServoState()
     servo.step(st, cfg, 0.0, servo.Target(az=0.0, el=math.radians(14.0),

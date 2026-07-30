@@ -116,6 +116,13 @@ class ServoConfig:
     # positive however far off-axis the target was.
     brake_az_rad: float = 0.45       # beyond ~26 deg off axis, decelerate
     brake_tilt: float = 0.45         # nose-UP fraction while braking
+    # Braking is a TRANSIENT, not a flight mode. Run 17 held BRK on every log
+    # line after the pass: the target kept hopping +-30 deg so |az_f| never fell
+    # below the threshold, and the aircraft sat at 30 deg nose-up while the
+    # elevation channel commanded thr=0.39 max climb. Nose-up plus max climb with
+    # a tilted thrust vector is how you depart controlled flight.
+    brake_max_s: float = 0.7         # then resume forward drive regardless
+    brake_vert_clamp: float = 0.25   # cap climb authority while braking
 
     # Braking AFTER the pass is late — the momentum is already there. We capture
     # the next gate's bearing as a hint while still flying the current one (see
@@ -140,7 +147,10 @@ class ServoConfig:
     # the gun — so refuse to ACQUIRE on anything steeper. Maintaining an
     # existing track is unrestricted, since a gate legitimately rises in view as
     # we close on it.
-    acquire_max_el_rad: float = 0.44   # 25 deg
+    # 25 deg proved too loose — run 17 acquired at el=+24.6 and +28.1 deg and
+    # then tracked one to +56.8. Gate 0 reads +14.0 deg at the gun (measured on
+    # the TRK line), so 18 deg keeps the course and excludes the rest.
+    acquire_max_el_rad: float = 0.31   # 18 deg
 
     # ── Track continuity ────────────────────────────────────────────────
     # The detector reports the best orange blob in EACH FRAME independently,
@@ -232,6 +242,7 @@ class ServoState:
     sweep_dir: float = 1.0
     sweep_limit: float | None = None
     search_t: float = 0.0            # time spent in the current search
+    brake_t: float = 0.0             # how long we have been braking continuously
     az_rate: float = 0.0             # d(az)/dt, smoothed — the damping signal
     el_rate: float = 0.0
     rng_f: float | None = None       # smoothed range, for continuity gating
@@ -389,9 +400,19 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
         # Any revival needs the hint to be attributable to the NEXT gate
         # specifically, which nothing currently establishes.
         # Far off axis: stop adding speed and start removing it, so the turn can
-        # actually be flown before the target leaves the FOV.
+        # actually be flown before the target leaves the FOV. Time-bounded —
+        # see brake_max_s.
         braking = abs(state.az_f) > cfg.brake_az_rad
+        if braking:
+            state.brake_t += dt
+            if state.brake_t > cfg.brake_max_s:
+                braking = False       # bank the speed we shed and fly again
+        else:
+            state.brake_t = 0.0
         fwd = -cfg.brake_tilt if braking else cfg.cruise_tilt * drive
+        if braking:
+            # Do not ask for max climb while already 30 deg nose-up.
+            vertical = clamp(vertical, -cfg.brake_vert_clamp, cfg.brake_vert_clamp)
         lateral = clamp(cfg.kp_lat * state.az_f, -cfg.max_lat, cfg.max_lat)
         if state.clear_until is not None and t < state.clear_until:
             lateral = 0.0          # not while the gate structure is alongside
