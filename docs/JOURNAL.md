@@ -1019,3 +1019,37 @@ silently destroys another.
 Elodin, both courses passing again:
     vq1      6/6  COMPLETE  58.96s
     vq2turn  4/4  COMPLETE  24.92s
+
+## VQ2 official run 14 — raising MAX_TILT_RAD made the speed problem WORSE
+
+Crashed into the base of gate 0 faster than any previous run. The log says why in
+one column: pitch stayed at -17.4 / -16.8 / -19.1 and never levelled, where
+earlier runs sat near -11.
+
+cruise_tilt, max_lat and brake_tilt are all FRACTIONS of MAX_TILT_RAD. Raising it
+from 20 to 35 deg to buy braking authority raised the cruise angle from 11 to
+17.5 deg in lockstep, so the aircraft accelerated harder than ever. The change
+intended to fix excess speed directly increased it. That coupling was visible in
+the code and I did not look for it.
+
+Fixed by giving each authority its own ABSOLUTE angle, since what is wanted is a
+gentle cruise with strong turning and braking — three different requirements that
+one shared cap cannot express:
+
+    FWD_TILT_RAD   14 deg  -> cruise 7.7 deg  -> 1.33 m/s^2 forward  (was 1.9)
+    LAT_TILT_RAD   30 deg  -> lateral 18 deg  -> 3.19 m/s^2 crossrange (was 1.2)
+    BRAKE_TILT_RAD 30 deg  ->                    5.66 m/s^2, 1.4 s to shed 8 m/s
+
+So cruise acceleration is now LOWER than the original 20 deg setup while braking
+is 3.6x stronger and crossrange 2.7x stronger. Those numbers move in the
+directions the last three runs actually asked for.
+
+IMPORTANT LIMITATION: these constants live in controller_vq2 and Elodin's harness
+maps tilt through its own mixer, so Elodin cannot validate this change at all. It
+verified the servo POLICY (when to brake, when to turn) and is blind to the
+plant scaling. The only test of these three numbers is the official sim.
+
+Also seen and not yet addressed: one detection at v=34.9 (very high in frame,
+conf 0.87) produced vz=+11.53. A gate that high is likely one of the hangar's
+ceiling-mounted gates, and the vertical channel obeyed it. Target selection by
+"biggest orange blob" still has no notion of which gate belongs to the course.
