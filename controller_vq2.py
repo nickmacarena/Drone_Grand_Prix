@@ -85,11 +85,9 @@ YAW_SIGN = -1.0
 # MISSION=yawtest: isolate rotation from translation (see _yaw_test_step).
 YAW_AUTOFLIP = os.environ.get("YAW_AUTOFLIP", "0") == "1"
 
-YAWTEST_RATE = 0.35        # rad/s — slow, so the gate stays in frame
-YAWTEST_S = 6.0            # rotate for this long
-YAWTEST_SETTLE_S = 1.0     # hold still before rotating
-YAWTEST_CLIMB_S = 1.2      # lift, then an equal reverse pulse to stop climbing
-YAWTEST_CLIMB_THRUST = 0.33
+YAWTEST_RATE = 1.2         # rad/s — fast, so rotation dominates translation
+YAWTEST_S = 5.0            # rotate for this long
+YAWTEST_MIN_RANGE = 8.0    # m; closer than this, translation contaminates
 CAM_FX_PX = 320.0          # du/dyaw for pure rotation is -fx
 
 # ── Calibration ──────────────────────────────────────────────────────
@@ -178,6 +176,7 @@ class ControllerVQ2:
         self._yaw_chk = servo.PolarityCheck()
         self._yawtest_t0 = None
         self._yawtest_samples = []
+        self._yawtest_last_report = 0.0
         self._yawtest_done = False
         self.servo_cfg = servo.ServoConfig()
 
@@ -302,32 +301,29 @@ class ControllerVQ2:
         return 0.0, 0.0, 0.0, self._damped_hover()   # hover/frames: hold still
 
     def _yaw_test_step(self, t):
-        """Measure the yaw convention directly, with translation removed.
+        """Measure the yaw convention. Rotate FAST, immediately, and report early.
 
-        Six runs were spent inferring this from race logs and every inference was
-        confounded identically: at the ranges that mattered (1-4 m, 30-40 deg off
-        axis, ~8 m/s) the bearing rate from TRANSLATION is v*sin(az)/r ~ 1.3
-        rad/s, triple the commanded yaw. Runs 10 and 11 flew opposite signs and
-        BOTH showed azimuth increasing — proof the measurement said nothing.
+        Three attempts to make this a hover test failed on the same fact: the
+        aircraft reaches gate 0 within ~1.5 s of the gun regardless of what we
+        command (rng 5.3 -> 2.5 in the first two samples), so any test with a
+        lift/arrest/settle preamble is destroyed before it measures anything.
 
-        Attempt 1 of this test also failed, for a duller reason: it applied hover
-        thrust while parked on the 17.8 deg nose-down ramp. At exactly hover it
-        barely unsticks, and the ramp attitude supplies g*sin(17.8) ~ 3 m/s2 of
-        FORWARD acceleration, so it slid into gate 0 before rotating.
+        Hovering was never the requirement — separating rotation from translation
+        was, and speed does that just as well. Translation contributes
+        v*sin(az)/r to the bearing rate: at 10 m and 8 m/s that is ~0.4 rad/s,
+        so rotating at 1.2 rad/s makes rotation dominate 3:1 while moving. Only
+        sightings beyond YAWTEST_MIN_RANGE are used, where that holds.
 
-        So: lift off deliberately, cancel the climb with a matched reverse pulse
-        (the only way to stop without velocity feedback), settle, then rotate —
-        and regress u against yaw over the whole rotation rather than comparing
-        two endpoints. The slope is the answer AND its own sanity check: pure
-        rotation must give du/dyaw ~ -fx = -320 px/rad. A slope far from that
-        magnitude means something other than rotation moved the gate, and the
-        result should be discarded rather than believed.
+        The verdict is also printed every second, so a run cut short by a crash
+        still delivers the answer. Attempt 3 rotated cleanly and produced usable
+        data, and none of it reached the report because the aircraft hit gate 0
+        three seconds before the deadline.
         """
         if self._yawtest_t0 is None:
             self._yawtest_t0 = t
-            print(f"  [YAWTEST] lift {YAWTEST_CLIMB_S}s, arrest "
-                  f"{YAWTEST_CLIMB_S}s, settle {YAWTEST_SETTLE_S}s, then yaw "
-                  f"{YAWTEST_RATE:+.2f} rad/s for {YAWTEST_S}s", flush=True)
+            print(f"  [YAWTEST] rotating {YAWTEST_RATE:+.2f} rad/s immediately; "
+                  f"using sightings beyond {YAWTEST_MIN_RANGE:.0f} m so rotation "
+                  f"dominates translation", flush=True)
         e = t - self._yawtest_t0
 
         frame = self.shared.latest_frame
@@ -340,39 +336,37 @@ class ControllerVQ2:
         obs = self._last_obs
         _, _, yaw_est = self._est_euler()
 
-        t_arrest = YAWTEST_CLIMB_S
-        t_settle = t_arrest + YAWTEST_CLIMB_S
-        t_spin = t_settle + YAWTEST_SETTLE_S
-        t_end = t_spin + YAWTEST_S
+        if obs is not None and obs.confidence >= 0.5 and \
+                obs.range_m >= YAWTEST_MIN_RANGE:
+            self._yawtest_samples.append((yaw_est, obs.u, obs.width_px))
 
-        if e < t_arrest:                    # unstick from the ramp and level
-            return 0.0, 0.0, 0.0, YAWTEST_CLIMB_THRUST
-        if e < t_settle:                    # matched reverse pulse: vz -> ~0
-            return 0.0, 0.0, 0.0, max(0.0, 2.0 * self.hover - YAWTEST_CLIMB_THRUST)
-        if e < t_spin:                      # hold still, fix the start bearing
-            return 0.0, 0.0, 0.0, self.hover
-        if e < t_end:
-            if obs is not None and obs.confidence >= 0.5:
-                self._yawtest_samples.append((yaw_est, obs.u, obs.width_px))
+        # Report as we go: a crash must not cost us the measurement.
+        if e - self._yawtest_last_report >= 1.0:
+            self._yawtest_last_report = e
+            self._report_yaw_test(interim=True)
+
+        if e < YAWTEST_S:
             return 0.0, 0.0, YAWTEST_RATE, self.hover
-
         if not self._yawtest_done:
             self._yawtest_done = True
             self._report_yaw_test()
         return 0.0, 0.0, 0.0, self.hover
 
-    def _report_yaw_test(self):
+    def _report_yaw_test(self, interim: bool = False):
         """Report the measured convention (regression lives in servo)."""
         pts = [(y, u) for y, u, _w in self._yawtest_samples]
+        tag = "[YAWTEST*]" if interim else "[YAWTEST]"
         verdict, slope, span, note = servo.yaw_convention(pts, fx=CAM_FX_PX)
-        print(f"  [YAWTEST] {len(pts)} sightings, yaw spanned {span:.1f} deg, "
+        if interim and verdict == "inconclusive":
+            return                       # stay quiet until there is something
+        print(f"  {tag} {len(pts)} sightings, yaw spanned {span:.1f} deg, "
               f"applied {self.rate_sign[2] * self.yaw_sign * YAWTEST_RATE:+.2f} "
               f"rad/s", flush=True)
         if verdict == "inconclusive":
-            print(f"  [YAWTEST] INCONCLUSIVE: {note}. Do not change YAW_SIGN "
+            print(f"  {tag} INCONCLUSIVE: {note}. Do not change YAW_SIGN "
                   f"on this.", flush=True)
             return
-        print(f"  [YAWTEST] d(bearing)/d(yaw) = {slope:+.2f} "
+        print(f"  {tag} d(bearing)/d(yaw) = {slope:+.2f} "
               f"(pure rotation gives -1.00)", flush=True)
         # The slope measures the PLANT (gyro vs image); both bearing and the
         # yaw estimate respond to the applied rate, so it is independent of
@@ -386,7 +380,7 @@ class ControllerVQ2:
         rs = self.rate_sign[2] or 1.0
         want = rs if verdict == "standard" else -rs
         agrees = "already correct" if want == self.yaw_sign else "NEEDS CHANGING"
-        print(f"  [YAWTEST] gyro/image convention is {verdict.upper()} "
+        print(f"  {tag} gyro/image convention is {verdict.upper()} "
               f"=> YAW_SIGN should be {want:+.0f} "
               f"(currently {self.yaw_sign:+.0f} — {agrees})", flush=True)
 

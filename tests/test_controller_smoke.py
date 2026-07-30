@@ -104,7 +104,7 @@ def fly(mission, steps=1400, gate_visible=True, plant_standard=True,
         u = 320.0 + 320.0 * math.tan(bearing)
         if gate_visible and 0.0 <= u < 640.0:
             C.detect_gate = lambda f, cam=None, _u=u: GateObservation(
-                az=bearing, el=0.02, u=_u, v=170.0, width_px=90.0,
+                az=bearing, el=0.02, u=_u, v=170.0, width_px=40.0,
                 confidence=1.0)
         else:
             C.detect_gate = lambda f, cam=None: None

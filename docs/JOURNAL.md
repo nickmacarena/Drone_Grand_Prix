@@ -899,3 +899,36 @@ default binds at def time, so reassigning the module global does nothing — the
 first version of the test silently flew -1 in all four cases.
 
 Still unknown: the real yaw convention. YAW_SIGN remains -1.0, untrusted.
+
+## yawtest attempt 3: rotated cleanly, and the answer was in the log
+
+Attempt 3 rotated properly (yaw 0 -> -19.6 -> -36.1 -> -47.1 deg) but hit gate 0
+and died three seconds before its report deadline. The measurement was extractable
+from the log by hand:
+
+    yaw    -0.9 ->  -19.6  (d=-18.7)   bearing +38.5 -> +18.4   slope +1.08
+    yaw   -19.6 ->  -36.1  (d=-16.5)   bearing +18.4 ->  -2.6   slope +1.27
+    yaw   -36.1 ->  -47.1  (d=-11.0)   bearing  -2.6 -> +41.8   slope -4.04  REJECTED
+
+Two usable pairs, mean +1.17. The magnitude near 1 is what makes it credible —
+that is the signature of genuine rotation rather than a pinned centroid or
+translation. The third pair self-rejects: u jumped 301 px, a different gate.
+
+Positive slope => the plant is INVERTED => YAW_SIGN = -rate_sign[2] = -1, which is
+what we are already flying. So the yaw sign is NOT the bug, and six runs of chasing
+it were chasing nothing. Recording that as a settled negative result.
+
+Redesign, attempt 4. Three attempts tried to hover first and all died to the same
+fact: the aircraft reaches gate 0 within ~1.5 s of the gun no matter what is
+commanded (rng 5.3 -> 2.5 in two samples), so any lift/arrest/settle preamble is
+destroyed before measuring. Hovering was never the requirement — separating
+rotation from translation was, and speed achieves that equally well. Translation
+contributes v*sin(az)/r, about 0.4 rad/s at 10 m and 8 m/s, so rotating at 1.2
+rad/s dominates 3:1 while moving. Now: rotate immediately at 1.2 rad/s, use only
+sightings beyond 8 m, and print the running verdict every second so a crash cannot
+cost the measurement again.
+
+The smoke test caught a real interaction the moment this landed: its synthetic gate
+had width_px=90 => range 5.3 m, inside the new 8 m gate, so the measurement got
+zero samples. Fixture corrected to width_px=40 (~12 m, as gate 0 is at the gun).
+That is the first time a test has caught a controller regression before the sim did.
