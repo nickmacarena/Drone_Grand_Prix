@@ -932,3 +932,45 @@ The smoke test caught a real interaction the moment this landed: its synthetic g
 had width_px=90 => range 5.3 m, inside the new 8 m gate, so the measurement got
 zero samples. Fixture corrected to width_px=40 (~12 m, as gate 0 is at the gun).
 That is the first time a test has caught a controller regression before the sim did.
+
+## VQ2 official run 12 — steering CONFIRMED working; the barrier is momentum
+
+The best run yet, and it settles two things.
+
+Gate 0 passed (fourth consecutive). Then:
+    DET u=533.4  yaw= -22.6    gate 1 acquired at 33 deg right
+    DET u=487.1  yaw= -72.6
+    DET u=292.4  yaw= -92.7    swept through centre
+    DET u= 76.7  yaw= -98.2    and out to 38 deg LEFT
+
+The servo acquired gate 1, turned onto it, and drove its bearing from 33 deg
+right through centre to 38 deg left. STEERING WORKS, and YAW_SIGN=-1 is confirmed
+by behaviour as well as by the yawtest regression. Both yaw questions are closed.
+
+Nick: "it flew through gate 0 too fast, so even though it turned to face the next
+gate, the momentum carried gate 1 out of its pov." Correct, and it is geometry
+rather than tuning. Turning an 8 m/s velocity vector through 42 deg needs
+dv = 2*v*sin(21 deg) = 5.7 m/s. Lateral authority was max_lat 0.35 of a 20 deg
+MAX_TILT = 1.2 m/s^2, so 2.7 s — and gate 1's bearing leaves the FOV in under 1 s.
+No gain fixes that; speed has to come off.
+
+Critically, the speed is not ours to avoid by cruising gentler. MAX_TILT_RAD is
+20 deg, so cruise_tilt 0.55 commands 11 deg => 1.9 m/s^2 => about 2.9 m/s by gate
+0, yet it arrives at ~8 m/s. The ramp launch supplies the rest, so lowering
+cruise_tilt would barely touch it. The only lever is to actively brake, which the
+old drive = max(min_tilt_frac, align) could never do: it kept forward tilt
+POSITIVE however far off axis the target was, so the aircraft accelerated
+throughout every turn.
+
+Changes:
+  * brake_az_rad 0.45 / brake_tilt 0.45 — beyond ~26 deg off axis, command
+    nose-UP and decelerate instead of merely easing off.
+  * max_lat 0.35 -> 0.60, doubling crossrange authority to ~2.4 m/s^2.
+  * Pre-emptive braking: because the next-gate hint is captured while still
+    flying the current gate, a known sharp turn ahead now slows the approach
+    (drive *= 0.45 inside 7 m) rather than being discovered on the far side,
+    where the momentum already exists.
+
+Elodin, both courses still complete — slower, as braking implies:
+    vq2turn  4/4  19.23s -> 24.92s
+    vq1      6/6  55.85s -> 58.96s

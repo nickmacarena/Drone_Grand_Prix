@@ -83,12 +83,40 @@ class ServoConfig:
     # centre, outside the 0.75 m half-opening. Roll gives crossrange authority
     # directly instead of via the heading.
     kp_lat: float = 0.9
-    max_lat: float = 0.35
+    max_lat: float = 0.60      # was 0.35, giving only ~1.2 m/s^2 of crossrange
 
     # Forward drive
     cruise_tilt: float = 0.55        # normalized forward tilt when lined up
     min_tilt_frac: float = 0.15      # floor so we never fully stall out
     align_falloff_rad: float = 0.60  # azimuth error that halves forward drive
+
+    # BRAKING. Official run 12 acquired gate 1 at 33 deg right and swung it
+    # cleanly through centre to 38 deg left — the steering worked — but
+    # translated out of the window while turning. Nick: "it flew through gate 0
+    # too fast, so even though it turned to face the next gate, the momentum
+    # carried gate 1 out of its pov."
+    #
+    # This is not a gain shortfall, it is geometry. Turning an 8 m/s velocity
+    # vector through 42 deg needs dv = 2*v*sin(21 deg) = 5.7 m/s; with 1.2 m/s^2
+    # of lateral authority that takes 2.7 s, and gate 1's bearing leaves the FOV
+    # in well under 1 s. You cannot out-gain it. You have to shed speed.
+    #
+    # Note the speed is NOT ours to avoid by cruising gentler: MAX_TILT_RAD is
+    # 20 deg, so cruise_tilt 0.55 commands 11 deg => 1.9 m/s^2 => ~2.9 m/s by
+    # gate 0, yet it arrives at ~8 m/s. The ramp launch supplies the rest. The
+    # only lever we have is to actively brake, which the old
+    # drive = max(min_tilt_frac, align) could never do — it kept forward tilt
+    # positive however far off-axis the target was.
+    brake_az_rad: float = 0.45       # beyond ~26 deg off axis, decelerate
+    brake_tilt: float = 0.45         # nose-UP fraction while braking
+
+    # Braking AFTER the pass is late — the momentum is already there. We capture
+    # the next gate's bearing as a hint while still flying the current one (see
+    # PolarityCheck's neighbour, hint_az), so when the next gate is known to be
+    # far off axis we can arrive slower and ready to turn. Only applied close in,
+    # so the whole approach is not crawled.
+    pre_brake_range_m: float = 7.0
+    pre_brake_frac: float = 0.45
 
     # Confidence gating: a low-confidence detection still steers, but gently.
     min_confidence: float = 0.15
@@ -325,11 +353,23 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
             drive *= cfg.hold_drive_decay
         else:
             drive *= max(cfg.min_tilt_frac, confidence)
+        # Approaching this gate with a sharp turn known to follow: shed speed
+        # now rather than discovering the problem on the far side.
+        if (state.hint_az is not None
+                and abs(state.hint_az) > cfg.brake_az_rad
+                and t - state.hint_t <= cfg.hint_max_age_s
+                and state.rng_f is not None
+                and state.rng_f < cfg.pre_brake_range_m):
+            drive *= cfg.pre_brake_frac
+        # Far off axis: stop adding speed and start removing it, so the turn can
+        # actually be flown before the target leaves the FOV.
+        braking = abs(state.az_f) > cfg.brake_az_rad
+        fwd = -cfg.brake_tilt if braking else cfg.cruise_tilt * drive
         lateral = clamp(cfg.kp_lat * state.az_f, -cfg.max_lat, cfg.max_lat)
         if state.clear_until is not None and t < state.clear_until:
             lateral = 0.0          # not while the gate structure is alongside
         return ServoOutput(
-            tilt_fwd=cfg.cruise_tilt * drive,
+            tilt_fwd=fwd,
             tilt_right=lateral,
             vertical=vertical,
             yaw_rate=yaw_rate,
