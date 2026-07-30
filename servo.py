@@ -73,6 +73,21 @@ class ServoConfig:
     # apply. Without it the vertical loop is pure proportional on a
     # second-order plant and MUST overshoot — official run 6 climbed to gate
     # 0's centre, sailed past it, and clipped the top bar.
+    # A metre-based vertical channel was tried here and REVERTED. The reasoning is
+    # sound and worth revisiting: servoing on the ANGLE makes the loop gain scale
+    # with 1/range, so the same 1.0 m miss reads 4.8 deg at 12 m and 39.8 deg at
+    # 1.2 m — feeble when there is time to fix it, saturated when there is not.
+    # Run 20's track was 0.33 -> 1.70 -> 1.86 m of real miss while the angle went
+    # 3.4 -> 20.3 -> 57.2 deg. In the plant model, metres gave a 0.03 m worst miss
+    # against 0.37 m for angle.
+    #
+    # But it took the VQ1 replica 6/6 -> 2/6. On a course that descends 8.6 m
+    # between gates the offset is ~8.5 m at long range, so kp_el_m saturates the
+    # channel far from the gate and the aircraft overshoots vertically. The fix is
+    # probably to normalise by TIME-TO-GO (correct the miss by arrival: a ~
+    # 2*offset/t_go^2 law) rather than by distance alone, which is proper terminal
+    # guidance. That is a real piece of work, not a constant tweak, so it is left
+    # documented rather than half-done.
     kp_el: float = 0.8
     kd_el: float = 1.3
     max_vertical: float = 0.7

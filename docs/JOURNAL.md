@@ -1248,3 +1248,36 @@ instrumented print that found bug 2 took two minutes and settled what several ru
 of reasoning had not.
 
 Elodin, both courses passing: vq1 6/6 57.49s, vq2turn 4/4 21.20s.
+
+## VQ2 official run 20 — and an honest stocktake
+
+Gate 0 passed for the seventh consecutive run. Nothing beyond it, in twenty runs.
+
+What run 20 added: el reached +57.2 deg again DESPITE the new elevation continuity
+check, and converting the track to metres shows why that is not a bug at all —
+0.33 m, then 1.70 m, then 1.86 m of genuine vertical miss. At 1.2 m range a 1.86 m
+miss simply IS a 57 deg angle. The continuity gate was right to allow it.
+
+That points at a real design flaw: servoing the vertical channel on an ANGLE makes
+the loop gain scale with 1/range. The same 1.0 m miss reads 4.8 deg at 12 m and
+39.8 deg at 1.2 m, so the response is feeble while there is time to fix it and
+saturated once there is not. Implemented a metre-based channel, swept the gains
+against the plant model (kp 0.70 / kd 0.50, worst miss 0.03 m versus 0.37 m for
+angle) — and it took the VQ1 replica 6/6 -> 2/6, because on a course descending
+8.6 m between gates the offset is ~8.5 m at long range and the channel saturates
+far from the gate.
+
+REVERTED, with the reasoning kept in servo.py. The right form is almost certainly
+time-to-go normalisation (null the miss by arrival, ~2*offset/t_go^2) rather than
+distance alone, which is proper terminal guidance and a real piece of work rather
+than a constant tweak.
+
+PATTERN WORTH NAMING: that is the fourth consecutive Elodin regression from a
+change that was individually well-argued — pre-emptive braking, the commit fade,
+brake_tilt scaling, and now the metre channel. Each helped the specific failure in
+the last log and hurt the general case. This is overfitting to the most recent
+run, and the two-course check is the only thing catching it. The check is doing its
+job; the generating process is the problem.
+
+Current state, both Elodin courses passing: vq1 6/6 57.49s, vq2turn 4/4 21.20s.
+Twenty official runs: gate 0 reliable, gate 1 never reached.
