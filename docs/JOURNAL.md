@@ -1201,3 +1201,50 @@ would have acquired them.
 Elodin, both courses still passing and faster:
     vq1      6/6  56.48s  (was 57.49)
     vq2turn  4/4  21.13s  (unchanged)
+
+## VQ2 official run 19 — the continuity gate was locking itself out
+
+TRK made the failure legible: the track acquired gate 0 correctly at el=+3.8 deg
+and 5.5 m, then the SAME track read el=+48.3 at 4.2 m and +31.6 at 1.0 m, and the
+vertical channel commanded max climb (thr 0.39) while the aircraft was already
+committed to the gap.
+
+Two real bugs, one of which explains several earlier runs.
+
+BUG 1 — ELEVATION WAS NEVER CHECKED FOR CONTINUITY. _continuous() gated azimuth
+and range and not elevation, so a track could walk from a course gate onto a
+ceiling gate as long as azimuth and range stayed plausible. Acquisition was
+already elevation-limited; maintaining was not, which left the same hole one step
+later. Now gated, with a test on run 19's actual numbers.
+
+BUG 2 — THE GATE COMPARED AGAINST A LAGGING ESTIMATE, AND LOCKED ITSELF OUT.
+az_f/el_f/rng_f are EMA-smoothed and therefore lag. Instrumenting a gate closing
+at 11 m/s:
+     t  obs_rng  rng_f  d_rng  allowR
+  0.21      9.6   10.7   1.66    1.84
+  0.28      8.8   10.7   1.88    1.84  REJ
+  0.42      7.2    9.7   2.54    1.84  REJ
+  0.77      3.2    9.7   6.54    6.04  REJ
+The EMA lag alone exceeds the allowance under fast closure. Worse, rng_f only
+updates on ACCEPT, so the first rejection freezes it and every later sighting is
+refused for good. THAT is where runs 17 and 18 got rej counts of 24, 32 and 39,
+and why reject_timeout_s kept discarding good tracks and re-acquiring on whatever
+was brightest. It was never target ambiguity; the gate was eating its own track.
+
+Fix: compare against the track PREDICTED FORWARD to now (x_f + x_rate * gap) for
+all three quantities. A genuinely rising, fast-closing gate now goes from 7
+rejections to 0, while run 19's 44 deg elevation jump is still refused.
+
+Also tried and REMOVED: a terminal-commit fade scaling corrections down inside
+2.0 m. It was aimed at run 19's el=+48.3, but that symptom's cause was bug 1 — the
+track had walked onto a different gate, not a geometry blow-up we had to live with.
+With bug 1 fixed the fade treats a problem that no longer exists, and it cost the
+VQ1 replica 6/6 -> 2/6 by suppressing the corrections needed to line up on a
+descending course. Removed, and the reasoning recorded in servo.py.
+
+Worth noting how this went right: three changes landed together, VQ1 regressed,
+and isolating the one with the weakest surviving justification restored it. The
+instrumented print that found bug 2 took two minutes and settled what several runs
+of reasoning had not.
+
+Elodin, both courses passing: vq1 6/6 57.49s, vq2turn 4/4 21.20s.

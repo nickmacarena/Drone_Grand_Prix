@@ -132,6 +132,7 @@ def main():
         check(name, ok, f"closest approach {best:.2f} m")
 
     print("\n[target selection — official runs 13/15 regression]")
+    test_elevation_continuity()
     test_speed_braking()
     test_braking_is_bounded()
     test_ceiling_gate_not_acquired()
@@ -350,6 +351,42 @@ def test_no_slam_after_gate_pass():
           f"(limit {cfg.max_yaw_accel})")
     check("it does eventually turn toward the gate", out.yaw_rate > 0.3,
           f"yaw settled at {out.yaw_rate:+.2f} rad/s")
+
+
+def test_elevation_continuity():
+    """A track must not slide up to a different gate (official run 19).
+
+    Run 19 acquired gate 0 at el=+3.8 deg and 5.5 m, then the SAME track read
+    el=+48.3 at 4.2 m and +31.6 at 1.0 m. Azimuth and range stayed plausible the
+    whole way, and elevation was not checked, so the track walked from the course
+    gate up to what was almost certainly a ceiling gate — and the vertical channel
+    commanded max climb at the moment the aircraft was committed to the gap.
+    """
+    cfg = servo.ServoConfig()
+    st = servo.ServoState()
+    servo.step(st, cfg, 0.0, servo.Target(az=0.0, el=math.radians(3.8),
+                                          confidence=1.0, range_m=5.5))
+    check("acquired the low gate", st.have_fix)
+
+    # Run 19's actual next sighting: same azimuth, similar range, 44 deg higher.
+    servo.step(st, cfg, 0.05, servo.Target(az=0.0, el=math.radians(48.3),
+                                           confidence=1.0, range_m=4.2))
+    check("elevation jump rejected", st.rejected >= 1,
+          f"el_f held at {math.degrees(st.el_f):.1f} deg, rej={st.rejected}")
+    check("track did not follow it up", math.degrees(st.el_f) < 20.0,
+          f"el_f {math.degrees(st.el_f):.1f} deg")
+
+    # A gate genuinely rising as we close must still be tracked, though.
+    st2 = servo.ServoState()
+    servo.step(st2, cfg, 0.0, servo.Target(az=0.0, el=math.radians(4.0),
+                                           confidence=1.0, range_m=12.0))
+    for i in range(1, 12):
+        servo.step(st2, cfg, i * 0.07,
+                   servo.Target(az=0.0, el=math.radians(4.0 + 1.6 * i),
+                                confidence=1.0, range_m=12.0 - 0.8 * i))
+    check("a genuinely rising gate is still followed",
+          st2.have_fix and math.degrees(st2.el_f) > 12.0,
+          f"el_f {math.degrees(st2.el_f):.1f} deg, rej={st2.rejected}")
 
 
 def test_speed_braking():

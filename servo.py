@@ -140,7 +140,17 @@ class ServoConfig:
     # reasoning as BRAKE_TILT_RAD. Elodin's aircraft cruises at ~2.6 m/s, so a
     # 2.5 m/s limit tuned for the official sim braked it permanently and took the
     # VQ1 replica 6/6 -> 1/6. controller_vq2 sets the real value.
+    max_el_step_rad: float = 0.12    # elevation continuity, as for azimuth
+    max_el_rate: float = 1.8
+
     max_closure: float = 1e9         # m/s of measured range decrease
+
+    # A terminal-commit fade (corrections scaled down inside 2.0 m) was tried here
+    # and REMOVED. It was a response to run 19's el=+48.3 deg, but that symptom's
+    # real cause was the MISSING ELEVATION CONTINUITY CHECK below — the track had
+    # walked onto a different gate. With that fixed the fade is treating a problem
+    # that no longer exists, and it cost the VQ1 replica 6/6 -> 2/6 by suppressing
+    # the corrections needed to line up on a descending course.
     closure_alpha: float = 0.3       # smoothing on the differentiated range
 
     # Braking AFTER the pass is late — the momentum is already there. We capture
@@ -312,21 +322,43 @@ def _continuous(state: ServoState, cfg: ServoConfig, t: float,
                 obs: "Target") -> bool:
     """Could this sighting be the same physical gate as the current track?
 
+    Compares against the track PREDICTED FORWARD to now, not against its stored
+    value. That distinction is not cosmetic: az_f/el_f/rng_f are EMA-smoothed and
+    therefore lag, and under fast closure the lag alone exceeds the allowance —
+    a gate closing at 11 m/s was rejected from 0.28 s in, after which rng_f froze
+    (it only updates on accept) and every later sighting was refused for good.
+    That is where runs 17 and 18 got rej counts of 24, 32 and 39, and why the
+    reject timeout kept discarding good tracks and re-acquiring on whatever was
+    brightest.
+
     Rejects mistaken identity, not honest noise: the bounds allow a fast gate
-    crossing the frame and a fast closure, and only refuse motion no rigid
-    object could produce in the elapsed time.
+    crossing the frame and a fast closure, and only refuse motion no rigid object
+    could produce in the elapsed time.
     """
     gap = 0.0 if state.t_last_accept is None else max(0.0, t - state.t_last_accept)
 
-    if abs(obs.az - state.az_f) > cfg.max_az_step_rad + cfg.max_az_rate * gap:
+    az_pred = state.az_f + state.az_rate * gap
+    if abs(obs.az - az_pred) > cfg.max_az_step_rad + cfg.max_az_rate * gap:
+        return False
+
+    # ELEVATION was missing from this check entirely, and that is how run 19
+    # failed: a track acquired on gate 0 at el=+3.8 deg slid to +48.3 and then
+    # +31.6 while azimuth and range stayed plausible, so the vertical channel
+    # commanded max climb toward what was almost certainly a ceiling gate.
+    # Acquisition was already elevation-limited; maintaining was not, which left
+    # the same hole one step later.
+    el_pred = state.el_f + state.el_rate * gap
+    if abs(obs.el - el_pred) > cfg.max_el_step_rad + cfg.max_el_rate * gap:
         return False
 
     if (state.rng_f is not None and obs.range_m is not None
             and math.isfinite(obs.range_m)):
-        if abs(obs.range_m - state.rng_f) > (cfg.range_slack_m
-                                             + cfg.max_closing_speed * gap):
+        rng_pred = state.rng_f + state.rng_rate * gap
+        if abs(obs.range_m - rng_pred) > (cfg.range_slack_m
+                                          + cfg.max_closing_speed * gap):
             return False
     return True
+
 
 
 def step(state: ServoState, cfg: ServoConfig, t: float,
@@ -431,7 +463,7 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
         # Two independent reasons to shed speed: badly mis-aimed, or closing too
         # fast to fly the next turn whatever the aim.
         too_fast = -state.rng_rate > cfg.max_closure
-        braking = abs(state.az_f) > cfg.brake_az_rad or too_fast
+        braking = (abs(state.az_f) > cfg.brake_az_rad or too_fast)
         if braking:
             state.brake_t += dt
             if state.brake_t > cfg.brake_max_s:
