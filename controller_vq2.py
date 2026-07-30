@@ -61,9 +61,26 @@ G = 9.80665
 
 # NED: down is +z, so "up" is -z.
 UP_NED = (0.0, 0.0, -1.0)
-# Servo says "turn right"; in FRD +body-z already turns right. (Elodin FLU
-# needs -1; see tests/test_servo.py.)
-YAW_SIGN = +1.0
+# Servo says "turn right". Textbook FRD says +body-z does that, which is why
+# this was +1 for runs 1-10 — and it is empirically WRONG for this sim.
+#
+# Run 10, post-gate-0: we commanded right, the yaw estimate advanced 58 deg, and
+# the target moved from 32 deg right (u=521) to 44 deg right (u=630). A real
+# right turn sweeps a right-hand target toward centre and out the left side; it
+# can only move further right if the aircraft turned LEFT. Nick saw exactly that
+# ("turn and face left"). Runs 6-10 all show the same monotone yaw runaway: the
+# azimuth loop was in POSITIVE feedback the whole time.
+#
+# The in-race gyro test cannot catch this. It checks that the commanded rate and
+# the gyro agree in sign, which they do; it never checks whether the resulting
+# rotation moves the IMAGE the expected way.
+YAW_SIGN = -1.0
+
+# ...and because that was a one-line inference costing a five-minute run to
+# test, the aircraft now checks it in flight. Commanding yaw toward a tracked
+# gate must make its azimuth shrink. If commanded yaw and measured d(az)/dt
+# agree in sign often enough, steering is inverted and we flip once.
+# Thresholds live in servo.PolarityCheck.
 
 # ── Calibration ──────────────────────────────────────────────────────
 CAL_THRUST = 0.30         # gentler than VQ1's 0.35: every m/s of climb
@@ -148,6 +165,7 @@ class ControllerVQ2:
         self.est_cfg = estimator.EstimatorConfig(up_world=up_world)
         self.servo_state = servo.ServoState()
         self._last_gate_index = None
+        self._yaw_chk = servo.PolarityCheck()
         self.servo_cfg = servo.ServoConfig()
 
         self.hover = None if CALIBRATE else HOVER_DEFAULT
@@ -208,6 +226,7 @@ class ControllerVQ2:
                 ATT_P * _wrap(roll_c - r), -MAX_RATE, MAX_RATE)
             pitch_rate = self.rate_sign[1] * _clamp(
                 ATT_P * _wrap(pitch_c - p), -MAX_RATE, MAX_RATE)
+            self._check_yaw_polarity(yaw_rate_c)
             yaw_rate_out = self.rate_sign[2] * self.yaw_sign * yaw_rate_c
         else:
             roll_rate = pitch_rate = yaw_rate_out = 0.0
@@ -366,6 +385,23 @@ class ControllerVQ2:
                    f_world[2] + g_world[2])
         return (a_world[0] * self.up_world[0] + a_world[1] * self.up_world[1]
                 + a_world[2] * self.up_world[2])
+
+    def _check_yaw_polarity(self, yaw_rate_c: float) -> None:
+        """Flip yaw_sign if flight data says steering is inverted (see servo)."""
+        if not self.servo_state.have_fix:
+            return
+        verdict = servo.check_polarity(self._yaw_chk, yaw_rate_c,
+                                       self.servo_state.az_rate)
+        if verdict == 0:
+            return
+        n, wrong = self._yaw_chk.total, self._yaw_chk.wrong
+        if verdict < 0:
+            self.yaw_sign = -self.yaw_sign
+            print(f"  [YAW] steering inverted ({wrong}/{n} samples) -> "
+                  f"yaw_sign={self.yaw_sign:+.0f}", flush=True)
+        else:
+            print(f"  [YAW] polarity confirmed ({n - wrong}/{n} samples)",
+                  flush=True)
 
     def _race_step(self, t):
         """Full visual servoing: detect the gate, de-rotate the sighting into

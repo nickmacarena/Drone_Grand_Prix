@@ -739,3 +739,46 @@ Elodin state: vq1 6/6 COMPLETE 55.85 s; vq2turn 4/4 COMPLETE 19.23 s.
 
 The vq2turn course lives in the local elodin clone (sim/course.py), which is not
 in this repo. Definition is reproduced in the entry above so it can be rebuilt.
+
+## VQ2 official run 10 — the azimuth loop was in POSITIVE FEEDBACK all along
+
+Nick, watching the run: "It seemed to turn and face left as it was about to pass
+through the first gate." That observation resolved runs 6 through 10.
+
+From the log, after clearing gate 0:
+    DET u=521.4  (32 deg right)   yaw= +49.8
+    no-gate                        yaw=+107.6      <- "turned right" 58 deg
+    DET u=630.5  (44 deg right)    yaw=+107.9
+
+We commanded right, the yaw estimate advanced 58 deg, and the target moved from
+32 deg right to 44 deg RIGHT. A genuine right turn sweeps a right-hand target to
+centre and out the left side. It can only move further right if the aircraft
+turned LEFT. Every run since 6 shows the same monotone runaway in the same
+direction: gate right -> command right -> turn left -> gate further right.
+
+YAW_SIGN was +1.0, justified in the comment by "in FRD +body-z already turns
+right". That is textbook-correct and empirically wrong for this sim. Now -1.0.
+
+Why the in-race sign detection never caught it: it verifies that the commanded
+rate and the GYRO agree in sign, which they do (+0.50 -> +0.112 every run). It
+never checks whether the resulting rotation moves the IMAGE the expected way.
+Those are different claims and only the second one matters for servoing.
+
+Because that fix is a one-line inference that would otherwise cost another
+five-minute run to test, the aircraft now checks itself in flight:
+servo.check_polarity() accumulates samples where the commanded yaw is large
+enough to dominate translation (>0.30 rad/s) AND there is a measurable bearing
+response (>0.05 rad/s), then flips once if 60% of 12 samples show the wrong
+sign. So a wrong constant self-corrects in ~0.4 s instead of losing a run.
+
+It lives in servo.py rather than the controller: it is a claim about bearings and
+steering, and putting it there keeps it testable without pymavlink (the first
+attempt imported controller_vq2 and needed numpy/PIL/pymavlink stubs — a good
+sign the logic was in the wrong module).
+
+tests/test_yaw_polarity.py asserts a correct plant is left alone, an inverted one
+is flipped, and the loop then converges (|az| -> 0.0 deg) rather than oscillating.
+
+Also worth recording: run 10's approach to gate 0 was the best yet — u=322.0,
+v=156.5 dead centre, and it passed with the new lateral control active. The
+approach was never the problem after the PD fix; the departure was.

@@ -371,6 +371,49 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
     )
 
 
+@dataclass
+class PolarityCheck:
+    """Evidence that steering actually reduces a tracked gate's azimuth.
+
+    Runs 6-10 all failed the same way: YAW_SIGN was +1, which textbook FRD says
+    is correct for "turn right" and this sim says is not, so the azimuth loop sat
+    in positive feedback. Five official runs to notice. The relationship is
+    directly measurable in flight — commanding yaw toward a gate must SHRINK its
+    azimuth — so a wrong constant should be self-correcting, not a lost run.
+
+    Lives here rather than in the controller because it is a statement about
+    bearings and steering, and because that keeps it testable without pymavlink.
+    """
+    wrong: int = 0
+    total: int = 0
+    decided: bool = False
+
+    # Thresholds: the commanded yaw must dominate the bearing change caused by
+    # translation, and there must be a measurable response to judge.
+    min_yaw_rate: float = 0.30
+    min_az_rate: float = 0.05
+    samples: int = 12
+    margin: float = 0.60
+
+
+def check_polarity(chk: PolarityCheck, yaw_cmd: float, az_rate: float) -> int:
+    """Accumulate evidence. Returns -1 to flip, +1 confirmed, 0 undecided.
+
+    Correct steering makes yaw_cmd and d(az)/dt OPPOSITE in sign.
+    """
+    if chk.decided:
+        return 0
+    if abs(yaw_cmd) < chk.min_yaw_rate or abs(az_rate) < chk.min_az_rate:
+        return 0            # a zero response would read as "correct"
+    chk.total += 1
+    if yaw_cmd * az_rate > 0.0:
+        chk.wrong += 1
+    if chk.total < chk.samples:
+        return 0
+    chk.decided = True
+    return -1 if (chk.wrong / chk.total) >= chk.margin else +1
+
+
 def gate_passed(state: ServoState, t: float | None = None,
                 cfg: ServoConfig | None = None) -> None:
     """Called when the sim's active_gate_index advances.
