@@ -1165,3 +1165,39 @@ brightest.
 Elodin, both courses improved (braking no longer latching costs less time):
     vq1      6/6  57.49s  (was 58.96)
     vq2turn  4/4  21.13s  (was 24.92)
+
+## VQ2 official run 18 — the brake was never armed; speed now governs speed
+
+Nick: "Never really slowed down or changed course towards the second gate." The
+telemetry says exactly why: BRK does not appear ONCE in the whole log.
+
+Braking was armed only by |az_f| > brake_az_rad (26 deg). On the approach az is ~0
+because we are aimed at the gate, and the post-pass targets sat at -10 and -25 deg,
+all inside the threshold. So a brake built to fix excess speed could only fire when
+badly mis-aimed, and the aircraft therefore arrived at gate 0 at full speed on
+every single run. Two commits' worth of braking work had no effect on the problem
+it was written for.
+
+Speed has to be governed by SPEED. Closure rate is observable — it is the
+derivative of the tracked range — so braking now also triggers on closing faster
+than max_closure, regardless of aim.
+
+Range caveat that matters for the threshold: rng comes from the detected OUTER
+frame width divided by the 1.5 m INNER opening, so it reads ~1.6x short and so
+does closure. The official sim's ~8 m/s true is ~5 m/s measured.
+
+max_closure is PLANT-SPECIFIC and defaults to OFF, the same treatment
+BRAKE_TILT_RAD needed. Setting 2.5 m/s globally took the VQ1 replica 6/6 -> 1/6,
+because Elodin's aircraft cruises at ~2.6 m/s and so braked permanently.
+controller_vq2 now sets 4.0, which brakes the official sim's 5 m/s measured
+closure and leaves Elodin's 2.6 alone. Third time a shared constant has meant two
+different things in the two harnesses; the pattern is that anything expressed in
+plant units belongs to the plant, not the servo.
+
+Also confirmed working from the same log: the 18 deg elevation cut refused the
+post-pass sightings at v=88.8 and v=51.5 (fix=n, SRCH), where the old 25 deg cut
+would have acquired them.
+
+Elodin, both courses still passing and faster:
+    vq1      6/6  56.48s  (was 57.49)
+    vq2turn  4/4  21.13s  (unchanged)

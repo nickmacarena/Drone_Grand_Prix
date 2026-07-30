@@ -124,6 +124,25 @@ class ServoConfig:
     brake_max_s: float = 0.7         # then resume forward drive regardless
     brake_vert_clamp: float = 0.25   # cap climb authority while braking
 
+    # SPEED braking. Run 18 never set BRK once, because braking was armed only by
+    # azimuth error: on the approach az is ~0 (we are aimed at the gate) and the
+    # post-pass targets sat at -10 and -25 deg, all inside the 26 deg threshold.
+    # So the aircraft always arrived at gate 0 at full speed — Nick: "never really
+    # slowed down or changed course towards the second gate."
+    #
+    # Speed has to be governed by speed, and closure rate is observable: it is the
+    # derivative of the tracked range. Note range is derived from the detected
+    # OUTER frame width divided by the 1.5 m INNER opening, so it reads about
+    # 1.6x short and so does closure; the threshold is in those measured units.
+    # 2.5 m/s measured is roughly 4 m/s true, which is where a 42 deg turn becomes
+    # comfortable given 3.19 m/s^2 of crossrange.
+    # PLANT-SPECIFIC, so it defaults to OFF and each harness sets it — the same
+    # reasoning as BRAKE_TILT_RAD. Elodin's aircraft cruises at ~2.6 m/s, so a
+    # 2.5 m/s limit tuned for the official sim braked it permanently and took the
+    # VQ1 replica 6/6 -> 1/6. controller_vq2 sets the real value.
+    max_closure: float = 1e9         # m/s of measured range decrease
+    closure_alpha: float = 0.3       # smoothing on the differentiated range
+
     # Braking AFTER the pass is late — the momentum is already there. We capture
     # the next gate's bearing as a hint while still flying the current one (see
     # PolarityCheck's neighbour, hint_az), so when the next gate is known to be
@@ -243,6 +262,7 @@ class ServoState:
     sweep_limit: float | None = None
     search_t: float = 0.0            # time spent in the current search
     brake_t: float = 0.0             # how long we have been braking continuously
+    rng_rate: float = 0.0            # d(range)/dt, smoothed; negative = closing
     az_rate: float = 0.0             # d(az)/dt, smoothed — the damping signal
     el_rate: float = 0.0
     rng_f: float | None = None       # smoothed range, for continuity gating
@@ -356,8 +376,14 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
             state.el_rate += b * ((state.el_f - el_prev) / gap - state.el_rate)
         if obs.range_m is not None and math.isfinite(obs.range_m):
             r = obs.range_m
-            state.rng_f = r if state.rng_f is None else (
-                state.rng_f + cfg.ema_alpha * (r - state.rng_f))
+            if state.rng_f is None:
+                state.rng_f = r
+            else:
+                prev_r = state.rng_f
+                state.rng_f += cfg.ema_alpha * (r - state.rng_f)
+                if gap and gap > 1e-3:
+                    state.rng_rate += cfg.closure_alpha * (
+                        (state.rng_f - prev_r) / gap - state.rng_rate)
         state.have_fix = True
         state.t_last_accept = t
         state.last_az = state.az_f
@@ -402,7 +428,10 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
         # Far off axis: stop adding speed and start removing it, so the turn can
         # actually be flown before the target leaves the FOV. Time-bounded —
         # see brake_max_s.
-        braking = abs(state.az_f) > cfg.brake_az_rad
+        # Two independent reasons to shed speed: badly mis-aimed, or closing too
+        # fast to fly the next turn whatever the aim.
+        too_fast = -state.rng_rate > cfg.max_closure
+        braking = abs(state.az_f) > cfg.brake_az_rad or too_fast
         if braking:
             state.brake_t += dt
             if state.brake_t > cfg.brake_max_s:
@@ -436,6 +465,7 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
     state.have_fix = False
     state.az_rate = 0.0
     state.el_rate = 0.0
+    state.rng_rate = 0.0
     state.search_t += dt
 
     # Bounded, widening sweep about the heading we started searching from.

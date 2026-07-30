@@ -26,6 +26,7 @@ Both are validated in tests/test_servo.py.
 import math
 import os
 import time
+from dataclasses import replace
 
 from attitude import quat_rotate
 from bearing import AIGP_CAM, stabilized_bearing
@@ -194,7 +195,12 @@ class ControllerVQ2:
         self._yawtest_samples = []
         self._yawtest_last_report = 0.0
         self._yawtest_done = False
-        self.servo_cfg = servo.ServoConfig()
+        # Closure limit is plant-specific (see servo.ServoConfig.max_closure).
+        # The official sim arrives at gate 0 at ~8 m/s true, and range is derived
+        # from the detected OUTER frame width against the 1.5 m INNER opening so
+        # it reads ~1.6x short — about 5 m/s in measured units. 4 m/s therefore
+        # brakes this aircraft without touching Elodin's slower one.
+        self.servo_cfg = replace(servo.ServoConfig(), max_closure=4.0)
 
         self.hover = None if CALIBRATE else HOVER_DEFAULT
         self.vz_est = 0.0         # m/s, +up. IMU-integrated; damping only.

@@ -132,6 +132,7 @@ def main():
         check(name, ok, f"closest approach {best:.2f} m")
 
     print("\n[target selection — official runs 13/15 regression]")
+    test_speed_braking()
     test_braking_is_bounded()
     test_ceiling_gate_not_acquired()
 
@@ -349,6 +350,47 @@ def test_no_slam_after_gate_pass():
           f"(limit {cfg.max_yaw_accel})")
     check("it does eventually turn toward the gate", out.yaw_rate > 0.3,
           f"yaw settled at {out.yaw_rate:+.2f} rad/s")
+
+
+def test_speed_braking():
+    """Brake on closure rate, not just on aiming error (official run 18).
+
+    Run 18 never set BRK at all: braking was armed only by |az| > 26 deg, and on
+    the approach az is ~0 because we are aimed at the gate. So it always arrived
+    at gate 0 at full speed. Closing fast at a well-centred gate must brake.
+    """
+    from dataclasses import replace
+    # max_closure defaults to OFF because it is plant-specific (controller_vq2
+    # sets 4.0 for the official sim; Elodin's slower aircraft leaves it off), so
+    # the test has to configure the limit it is exercising.
+    cfg = replace(servo.ServoConfig(), max_closure=2.5)
+    st = servo.ServoState()
+    dt = 0.05
+    # Dead-centre gate closing at ~6 m/s measured — well over max_closure.
+    rng = 30.0
+    braked = False
+    for i in range(60):
+        rng = max(1.0, rng - 6.0 * dt)
+        out = servo.step(st, cfg, i * dt,
+                         servo.Target(az=0.0, el=0.0, confidence=1.0,
+                                      range_m=rng))
+        if out.braking:
+            braked = True
+    check("fast closure on a centred gate brakes", braked,
+          f"rng_rate {st.rng_rate:+.2f} m/s vs max_closure {cfg.max_closure}")
+
+    # A gentle approach must NOT brake, or nothing ever reaches a gate.
+    st2 = servo.ServoState()
+    rng, braked_slow = 30.0, False
+    for i in range(60):
+        rng = max(1.0, rng - 1.0 * dt)
+        out = servo.step(st2, cfg, i * dt,
+                         servo.Target(az=0.0, el=0.0, confidence=1.0,
+                                      range_m=rng))
+        if out.braking:
+            braked_slow = True
+    check("gentle closure does not brake", not braked_slow,
+          f"rng_rate {st2.rng_rate:+.2f} m/s")
 
 
 def test_braking_is_bounded():
