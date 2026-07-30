@@ -51,6 +51,13 @@ class ServoConfig:
     # gate is still visible, so it caused the very loss it was meant to prevent.
     # The slew limit above is what keeps the turn from snapping; this only needs
     # to carry us past the gate plane itself.
+    # MEASURED, not chosen: 0.25 s took the VQ1 replica 6/6 -> 5/6 and vq2turn
+    # 4/4 -> 2/4, while 0.15 holds both. The window is genuinely knife-edged
+    # because gate 1's bearing leaves the FOV within ~2 m of the gate-0 plane,
+    # so every extra 0.1 s of not steering costs about a metre of that budget.
+    # The post-pass tumbles in runs 15/16 are therefore NOT caused by too little
+    # clearance — widening this only loses the next gate. Do not raise it without
+    # rerunning both courses.
     clear_gate_s: float = 0.15
 
     # Gates can legitimately sit near the FOV edge (gate 1 is ~42 deg off), so

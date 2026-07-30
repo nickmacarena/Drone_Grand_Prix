@@ -189,6 +189,7 @@ class ControllerVQ2:
         self.servo_state = servo.ServoState()
         self._last_gate_index = None
         self._yaw_chk = servo.PolarityCheck()
+        self._last_braking = False
         self._yawtest_t0 = None
         self._yawtest_samples = []
         self._yawtest_last_report = 0.0
@@ -558,6 +559,7 @@ class ControllerVQ2:
                                  confidence=obs.confidence,
                                  range_m=obs.range_m)
         out = servo.step(self.servo_state, self.servo_cfg, t, target)
+        self._last_braking = out.braking
         if not out.have_target:
             # This used to `return 0, 0, 0, hover`, discarding the search output
             # entirely — so the bounded sweep, the oscillating vertical search and
@@ -605,10 +607,23 @@ class ControllerVQ2:
         o = self._last_obs
         det = (f"DET u={o.u:5.1f} v={o.v:5.1f} rng={o.range_m:5.1f} conf={o.confidence:.2f}"
                if o is not None else "no-gate")
+        # What the SERVO made of it. Several runs were diagnosed by inferring
+        # tracker state from raw detector output, which cannot distinguish a
+        # sighting the tracker accepted from one it correctly rejected as an
+        # impostor. Run 16 is unreadable without this: u went 320 -> 487 -> 73
+        # -> 487 and there is no way to tell which of those were steered on.
+        st = self.servo_state
+        trk = (f"TRK az={math.degrees(st.az_f):+5.1f} el={math.degrees(st.el_f):+5.1f} "
+               f"rng={st.rng_f:5.1f} " if st.rng_f is not None else
+               f"TRK az={math.degrees(st.az_f):+5.1f} el={math.degrees(st.el_f):+5.1f} "
+               f"rng=  --- ")
+        trk += (f"fix={'Y' if st.have_fix else 'n'} rej={st.rejected} "
+                f"{'SRCH' if st.searching else '    '}"
+                f"{' BRK' if self._last_braking else '    '}")
         print(f"  [VQ2] {MISSION} {att} a_up={a_up:+5.2f} thr={thrust:.2f} "
               f"vz={self.vz_est:+5.2f} hov={hov} armed={hb.armed if hb else '?'} "
               f"gate={rs.active_gate_index if rs else '?'} "
-              f"started={rs.race_started if rs else '?'} frame={frames} {det}",
+              f"started={rs.race_started if rs else '?'} frame={frames} {det} | {trk}",
               flush=True)
 
 

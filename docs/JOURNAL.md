@@ -1090,3 +1090,36 @@ of >10 g spikes as it tumbled). Two distinct bugs behind that:
    consumes the output.
 
 Elodin, both courses still passing: vq1 6/6 58.96s, vq2turn 4/4 24.92s.
+
+## VQ2 official run 16 — stop inferring tracker state; add the telemetry
+
+Gate 0 passed for the fifth consecutive run with a clean approach (pitch -7.3,
+u = 323/320). Then a tumble within one sample of the pass, again.
+
+The detections around the pass were:
+    approaching  u=320.0 rng=3.6   then  u=486.9 rng=6.2   (a different gate)
+    [GATE] passed 0 -> 1
+    post-pass    u= 73.5 rng=2.7   then  u=487.5 rng=1.4   (hopping left/right)
+
+And this log CANNOT say what the servo did with any of them. The DET line reports
+raw detector output, which does not distinguish a sighting the tracker accepted
+from one it correctly rejected as an impostor. Several runs have now been diagnosed
+by inferring tracker state from detector output, and that is exactly the habit that
+produced the wrong yaw-sign conclusion.
+
+So the log line now carries the tracker itself:
+    TRK az=.. el=.. rng=.. fix=Y/n rej=N SRCH BRK
+which shows the smoothed bearing being steered on, whether a track exists, how many
+sightings the continuity gate has refused, and whether search/braking are active.
+Next run should be readable without guesswork.
+
+Also tried and REVERTED: clear_gate_s 0.15 -> 0.25, on the theory that 1.2 m at
+8 m/s is too little to get clear of the gate structure before roll and yaw begin.
+It took the VQ1 replica 6/6 -> 5/6 and vq2turn 4/4 -> 2/4. The window is genuinely
+knife-edged: gate 1's bearing leaves the FOV within ~2 m of the gate-0 plane, so
+every extra 0.1 s of not steering costs about a metre of that budget. Which also
+settles a question — the post-pass tumbles are NOT caused by insufficient
+clearance, because widening it only loses the next gate. Comment in servo.py now
+records the measurement so it is not retried.
+
+Both courses restored: vq1 6/6 58.96s, vq2turn 4/4 24.92s.
