@@ -374,10 +374,145 @@ class ControllerVQ2:
             return
         print(f"  [YAWTEST] d(bearing)/d(yaw) = {slope:+.2f} "
               f"(pure rotation gives -1.00)", flush=True)
-        want = self.yaw_sign if verdict == "standard" else -self.yaw_sign
+        # The slope measures the PLANT (gyro vs image); both bearing and the
+        # yaw estimate respond to the applied rate, so it is independent of
+        # yaw_sign. The required constant therefore does NOT depend on the
+        # current one — deriving it from self.yaw_sign, as the first version
+        # did, would return a different answer per run from identical data.
+        #
+        # Servoing needs: yaw_rate_c > 0 (gate right) must shrink az. With
+        # applied = rate_sign[2] * yaw_sign * yaw_rate_c and a standard plant
+        # d(az)/dt = -applied, so rate_sign[2] * yaw_sign must be > 0.
+        rs = self.rate_sign[2] or 1.0
+        want = rs if verdict == "standard" else -rs
+        agrees = "already correct" if want == self.yaw_sign else "NEEDS CHANGING"
         print(f"  [YAWTEST] gyro/image convention is {verdict.upper()} "
               f"=> YAW_SIGN should be {want:+.0f} "
-              f"(currently {self.yaw_sign:+.0f})", flush=True)
+              f"(currently {self.yaw_sign:+.0f} — {agrees})", flush=True)
+
+    def _sign_step(self, t, imu):
+        """Pulse an axis and compare the GYRO against the command.
+
+        Alternates pulse / rest so each axis is measured from a calm start and
+        the aircraft is never left rotating.
+        """
+        if self._sign_t0 is None:
+            self._sign_t0 = t
+            self._sign_samples = []
+            self._sign_resting = False
+            pulse = [0.0, 0.0, 0.0]
+            pulse[self._sign_axis] = SIGN_PULSE_RATE
+            self._direct_rates = tuple(pulse)
+            print(f"  [SIGN] pulsing axis {self._sign_axis}", flush=True)
+
+        elapsed = t - self._sign_t0
+
+        if not self._sign_resting:
+            if imu is not None:
+                self._sign_samples.append(
+                    (imu.gx, imu.gy, imu.gz)[self._sign_axis])
+            if elapsed >= SIGN_PULSE_S:
+                n = len(self._sign_samples)
+                measured = sum(self._sign_samples) / n if n else 0.0
+                if abs(measured) >= SIGN_MIN_GYRO:
+                    self.rate_sign[self._sign_axis] = 1.0 if measured > 0 else -1.0
+                    verdict = f"{self.rate_sign[self._sign_axis]:+.0f}"
+                else:
+                    verdict = "no response, keeping default"
+                print(f"  [SIGN] axis {self._sign_axis}: commanded "
+                      f"{SIGN_PULSE_RATE:+.2f} -> gyro {measured:+.3f} rad/s "
+                      f"({n} samples) -> {verdict}", flush=True)
+                # Rest: zero rates, let the axis stop before the next test.
+                self._sign_resting = True
+                self._direct_rates = (0.0, 0.0, 0.0)
+            return 0.0, 0.0, 0.0, self._damped_hover()
+
+        if elapsed >= SIGN_PULSE_S + SIGN_SETTLE_S:
+            self._sign_axis += 1
+            self._sign_t0 = None
+            if self._sign_axis >= 3:
+                self._signs_done = True
+                self._direct_rates = None
+                print(f"  [SIGN] done: {self.rate_sign}", flush=True)
+        return 0.0, 0.0, 0.0, self._damped_hover()
+
+    def _calibrate(self, t, imu):
+        if self._cal_t0 is None:
+            self._cal_t0 = t
+            self.vz_est = 0.0          # at rest on the pad: a known zero
+            print(f"  [CAL] thrust={CAL_THRUST} for {CAL_DURATION_S}s "
+                  f"(vertical accel from IMU - VQ2 has no velocity)", flush=True)
+
+        elapsed = t - self._cal_t0
+        if elapsed > CAL_SKIP_S:
+            self._cal_samples.append(self._vertical_accel(imu))
+
+        if elapsed >= CAL_DURATION_S:
+            n = len(self._cal_samples)
+            a_up = sum(self._cal_samples) / n if n else 0.0
+            self.hover = _clamp(CAL_THRUST * G / max(a_up + G, 1.0),
+                                HOVER_MIN, HOVER_MAX)
+            print(f"  [CAL] a_up={a_up:+.2f} m/s^2 over {n} samples "
+                  f"-> hover={self.hover:.3f}", flush=True)
+        return 0.0, 0.0, 0.0, CAL_THRUST
+
+    def _integrate_vz(self, t, imu):
+        if self._vz_last_t is None:
+            self._vz_last_t = t
+            return
+        dt = t - self._vz_last_t
+        self._vz_last_t = t
+        if dt <= 0.0 or dt > 0.2:
+            return
+        self.vz_est += self._vertical_accel(imu) * dt
+        self.vz_est *= max(0.0, 1.0 - VZ_LEAK_PER_S * dt)
+
+    def _damped_hover(self) -> float:
+        """Hover thrust, minus whatever it takes to kill vertical speed.
+
+        Only valid while `vz_est` is a fresh transient (see VZ_DAMP_AFTER_SETTLE).
+        """
+        if self._settled and not VZ_DAMP_AFTER_SETTLE:
+            return _clamp(self.hover, THRUST_MIN, THRUST_MAX)
+        return _clamp(self.hover - VZ_DAMP * self.vz_est, THRUST_MIN, THRUST_MAX)
+
+    def _vertical_accel(self, imu) -> float:
+        """Kinematic acceleration along world UP, from the IMU alone.
+
+        The accelerometer reads specific force f = a - g in the body frame.
+        Rotating into the world and adding gravity back recovers a; its
+        component along UP is what hover calibration needs.
+        """
+        f_world = quat_rotate(self.est.q, (imu.ax, imu.ay, imu.az))
+        g_world = (-G * self.up_world[0], -G * self.up_world[1], -G * self.up_world[2])
+        a_world = (f_world[0] + g_world[0], f_world[1] + g_world[1],
+                   f_world[2] + g_world[2])
+        return (a_world[0] * self.up_world[0] + a_world[1] * self.up_world[1]
+                + a_world[2] * self.up_world[2])
+
+    def _check_yaw_polarity(self, yaw_rate_c: float) -> None:
+        """Flip yaw_sign if flight data says steering is inverted (see servo)."""
+        if not self.servo_state.have_fix:
+            return
+        verdict = servo.check_polarity(self._yaw_chk, yaw_rate_c,
+                                       self.servo_state.az_rate,
+                                       self.servo_state.rng_f)
+        if verdict == 0:
+            return
+        n, wrong = self._yaw_chk.total, self._yaw_chk.wrong
+        if verdict > 0:
+            print(f"  [YAW] polarity confirmed ({n - wrong}/{n} samples)",
+                  flush=True)
+        elif YAW_AUTOFLIP:
+            self.yaw_sign = -self.yaw_sign
+            print(f"  [YAW] steering inverted ({wrong}/{n} samples) -> "
+                  f"yaw_sign={self.yaw_sign:+.0f}", flush=True)
+        else:
+            # Run 11 flipped mid-flight on confounded close-range data and made
+            # things worse. Report, do not act, until MISSION=yawtest has
+            # settled the convention from a hover.
+            print(f"  [YAW] steering looks INVERTED ({wrong}/{n} samples); "
+                  f"not flipping (YAW_AUTOFLIP=1 to enable)", flush=True)
 
     def _race_step(self, t):
         """Full visual servoing: detect the gate, de-rotate the sighting into

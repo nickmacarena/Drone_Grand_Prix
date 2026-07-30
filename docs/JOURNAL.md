@@ -860,3 +860,42 @@ through such a turn. Fixed by dropping invisible samples, as reality does.
 STILL UNKNOWN: the actual yaw convention. Six race runs of inference were all
 confounded, the offline attempt was rejected, and yawtest attempt 1 never
 rotated. YAW_SIGN remains -1.0 and is NOT trusted.
+
+## Broken build reached the sim AGAIN — and the report logic was wrong too
+
+yawtest attempt 2 crashed instantly: AttributeError, no _integrate_vz. Index-based
+string surgery (slice from one "def" anchor to another) swallowed SIX methods:
+_sign_step, _calibrate, _integrate_vz, _damped_hover, _vertical_accel and
+_check_yaw_polarity. This is the SECOND time this exact accident has shipped —
+_calibrate/_vertical_accel went the same way earlier. Restored from ff7f4da.
+
+The reason it keeps reaching the simulator is that nothing ever ran the
+controller. Every test covered servo/estimator/bearing in isolation; none checked
+that ControllerVQ2 was even callable. tests/test_controller_smoke.py now:
+  * drives update() for every mission (hover/race/yawtest) against a synthetic
+    plant, asserting the loop runs and thrust stays in [0,1]
+  * runs the no-gate-visible path, where the search/sweep code lives
+  * greps every self._method() reference against the defined methods, which
+    catches this accident directly and cheaply
+
+Building that test then exposed a real bug in _report_yaw_test. The slope measures
+d(bearing)/d(yaw_est), and BOTH respond to the applied rate, so it is independent
+of yaw_sign — it characterises the PLANT, not our constant. The first version
+computed `want = self.yaw_sign if standard else -self.yaw_sign`, which returns a
+different answer per run from identical data. Correct derivation: servoing needs
+yaw_rate_c > 0 to shrink az; with applied = rate_sign[2]*yaw_sign*yaw_rate_c and a
+standard plant d(az)/dt = -applied, so rate_sign[2]*yaw_sign > 0, giving
+YAW_SIGN = rate_sign[2] for a standard plant and -rate_sign[2] for an inverted one.
+
+So a good measurement would still have produced a wrong recommendation — half the
+time, silently.
+
+The smoke test's plant now RESPONDS: commanded yaw is fed back as gyro and a
+world-fixed gate is reprojected, so yawtest yields a real verdict. All four
+combinations are asserted (standard/inverted plant x flying +1/-1) and the verdict
+is confirmed independent of the sign being flown, which is the property that bug
+violated. Note the test must pass yaw_sign to the constructor: the signature
+default binds at def time, so reassigning the module global does nothing — the
+first version of the test silently flew -1 in all four cases.
+
+Still unknown: the real yaw convention. YAW_SIGN remains -1.0, untrusted.
