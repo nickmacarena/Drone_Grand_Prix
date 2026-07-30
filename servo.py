@@ -124,6 +124,16 @@ class ServoConfig:
     # more evidence. A marginal blob may keep an established track alive; it
     # may not start one.
     acquire_confidence: float = 0.55
+    # The hangar has CEILING-MOUNTED gates (visible in run 6 frame 0), and the
+    # detector reports the biggest orange blob with no notion of which gates
+    # belong to the course. Run 15 locked onto one and climbed at +14.3 m/s
+    # (thr 0.39, a_up +45 on impact); run 13 saw the same thing at v=34.9.
+    #
+    # A course gate is roughly at our own altitude — gate 0 measures +14 deg at
+    # the gun — so refuse to ACQUIRE on anything steeper. Maintaining an
+    # existing track is unrestricted, since a gate legitimately rises in view as
+    # we close on it.
+    acquire_max_el_rad: float = 0.44   # 25 deg
 
     # ── Track continuity ────────────────────────────────────────────────
     # The detector reports the best orange blob in EACH FRAME independently,
@@ -288,8 +298,10 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
 
     usable = obs is not None and obs.confidence >= cfg.min_confidence
     if usable and not state.have_fix:
-        # No track yet: acquiring needs stronger evidence than maintaining.
-        usable = obs.confidence >= cfg.acquire_confidence
+        # No track yet: acquiring needs stronger evidence than maintaining, and
+        # must not start on something far above the course (see acquire_max_el).
+        usable = (obs.confidence >= cfg.acquire_confidence
+                  and abs(obs.el) <= cfg.acquire_max_el_rad)
     if usable and state.have_fix and not _continuous(state, cfg, t, obs):
         # Sighting is inconsistent with the track: almost certainly a
         # different object. Coast on the track instead of jumping to it.

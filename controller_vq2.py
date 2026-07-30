@@ -559,7 +559,17 @@ class ControllerVQ2:
                                  range_m=obs.range_m)
         out = servo.step(self.servo_state, self.servo_cfg, t, target)
         if not out.have_target:
-            return 0.0, 0.0, 0.0, self.hover
+            # This used to `return 0, 0, 0, hover`, discarding the search output
+            # entirely — so the bounded sweep, the oscillating vertical search and
+            # search_creep, all built and tested in runs 7-9, were DEAD CODE on
+            # the official sim. They only ever ran in Elodin, whose harness
+            # consumes tilt_fwd directly. On the sim a lost gate meant sitting
+            # level at hover thrust and coasting, with no attempt to reacquire.
+            return (0.0,
+                    -FWD_TILT_RAD * out.tilt_fwd,
+                    out.yaw_rate,
+                    _clamp(self.hover * (1.0 + VERT_AUTH_FRAC * out.vertical),
+                           THRUST_MIN, THRUST_MAX))
         if out.braking:
             # Absolute brake angle, independent of the servo's normalized scale.
             # Run 13 braked at 9 deg (1.55 m/s^2) and needed 5.1 s to shed the

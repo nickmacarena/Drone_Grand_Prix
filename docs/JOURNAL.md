@@ -1053,3 +1053,40 @@ Also seen and not yet addressed: one detection at v=34.9 (very high in frame,
 conf 0.87) produced vz=+11.53. A gate that high is likely one of the hangar's
 ceiling-mounted gates, and the vertical channel obeyed it. Target selection by
 "biggest orange blob" still has no notion of which gate belongs to the course.
+
+## VQ2 official run 15 — the approach is SOLVED; two real bugs found
+
+Best approach of the project. The decoupled tilt limits did exactly what they were
+meant to:
+    pitch -7.2 / -7.7  (run 14 was stuck at -17)   u = 324.0, 320.6, 325.0
+Dead centre, gentle, and gate 0 passed cleanly. The brake then fired at full
+authority (pitch +30.1 = BRAKE_TILT_RAD) immediately after the pass. Both of the
+last two changes worked.
+
+It then climbed at +14.3 m/s (thr 0.39) and hit something (a_up +45, then a string
+of >10 g spikes as it tumbled). Two distinct bugs behind that:
+
+1. CEILING GATES. The detector reports the biggest orange blob with no notion of
+   which gates are on the course, and this hangar has ceiling-mounted gates
+   (plainly visible in run 6 frame 0). The servo locked onto one and the vertical
+   channel obediently climbed into it. Run 13 showed the same thing at v=34.9.
+   Fix: acquisition now refuses sightings steeper than 25 deg elevation. Gate 0
+   measures +14 deg at the gun, so the cut admits the course and rejects the roof.
+   MAINTAINING a track is unrestricted, since a gate legitimately rises in view
+   as we close on it — the test asserts a track may follow one to 31 deg.
+
+2. THE SEARCH BEHAVIOUR WAS DEAD CODE ON THE OFFICIAL SIM. _race_step did
+       if not out.have_target: return 0.0, 0.0, 0.0, self.hover
+   discarding tilt_fwd, yaw_rate and vertical whenever the gate was lost. So the
+   bounded sweep, the oscillating vertical search and search_creep — all built and
+   debugged across runs 7-9 — never executed on the sim. They only ever ran in
+   Elodin, whose harness consumes tilt_fwd directly. On the official sim a lost
+   gate meant sitting level at hover thrust and coasting, with no attempt to
+   reacquire anything.
+
+   That is the sharpest example yet of the harness divergence problem: Elodin
+   validated code the sim could not reach. Worth remembering that "tested in
+   Elodin" only means "the servo policy is tested" unless the controller actually
+   consumes the output.
+
+Elodin, both courses still passing: vq1 6/6 58.96s, vq2turn 4/4 24.92s.

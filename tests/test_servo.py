@@ -131,6 +131,9 @@ def main():
                           enu=False)
         check(name, ok, f"closest approach {best:.2f} m")
 
+    print("\n[target selection — official runs 13/15 regression]")
+    test_ceiling_gate_not_acquired()
+
     print("\n[post-gate handling — official run 8 regression]")
     test_no_slam_after_gate_pass()
 
@@ -345,6 +348,38 @@ def test_no_slam_after_gate_pass():
           f"(limit {cfg.max_yaw_accel})")
     check("it does eventually turn toward the gate", out.yaw_rate > 0.3,
           f"yaw settled at {out.yaw_rate:+.2f} rad/s")
+
+
+def test_ceiling_gate_not_acquired():
+    """Do not start a track on a gate far above the course (runs 13 and 15).
+
+    The hangar has ceiling-mounted gates and the detector reports the biggest
+    orange blob with no notion of which gates are on the course. Run 15 locked
+    onto one and climbed at +14.3 m/s into it; run 13 saw the same at v=34.9.
+    Gate 0 legitimately sits ~14 deg up at the gun, so the cut has to admit that
+    while refusing the ceiling.
+    """
+    cfg = servo.ServoConfig()
+
+    st = servo.ServoState()
+    servo.step(st, cfg, 0.0, servo.Target(az=0.0, el=math.radians(45.0),
+                                          confidence=1.0, range_m=20.0))
+    check("ceiling gate does not acquire", not st.have_fix,
+          "el=45 deg, conf=1.0")
+
+    st = servo.ServoState()
+    servo.step(st, cfg, 0.0, servo.Target(az=0.0, el=math.radians(14.0),
+                                          confidence=1.0, range_m=12.0))
+    check("gate 0 at +14 deg still acquires", st.have_fix)
+
+    # An established track may follow a gate upward as we close on it — the
+    # restriction is on acquiring, not on tracking.
+    for i in range(1, 8):
+        servo.step(st, cfg, i * 0.1,
+                   servo.Target(az=0.0, el=math.radians(14.0 + 6.0 * i),
+                                confidence=1.0, range_m=12.0 - i))
+    check("existing track may rise past the cut", st.have_fix,
+          f"el_f now {math.degrees(st.el_f):.0f} deg")
 
 
 if __name__ == "__main__":
