@@ -379,7 +379,7 @@ class ControllerVQ2:
             if self._last_gate_index is not None:
                 print(f"  [GATE] passed {self._last_gate_index} -> "
                       f"{rs.active_gate_index}; re-centring search", flush=True)
-                servo.gate_passed(self.servo_state)
+                servo.gate_passed(self.servo_state, t, self.servo_cfg)
                 self._last_obs = None
             self._last_gate_index = rs.active_gate_index
 

@@ -34,6 +34,18 @@ class ServoConfig:
     kp_yaw: float = 2.0
     kd_yaw: float = 0.30      # same idea, applied to the azimuth bearing
     max_yaw_rate: float = 1.6
+    # Slew limit. Run 8 acquired gate 1 at u=609 (42 deg right, at the FOV edge
+    # — the course turns hard right after gate 0) and commanded 1.47 rad/s in a
+    # SINGLE step, 1 m past the gate plane with gate 0's posts still alongside.
+    # It clipped one and inverted to roll +174. The target was right; the
+    # violence was not.
+    max_yaw_accel: float = 2.2       # rad/s^2
+
+    # After clearing a gate, fly straight briefly before steering. At 1 m past
+    # the gate plane the structure is still beside us, and that is the worst
+    # possible moment for a hard turn. Tracking continues throughout — only the
+    # steering is held off.
+    clear_gate_s: float = 0.45
 
     # Vertical: elevation error -> normalized vertical effort.
     # kd_el damps using the MEASURED rate of change of the elevation bearing.
@@ -139,6 +151,8 @@ class ServoState:
     az_f: float = 0.0                # smoothed bearing (the working estimate)
     el_f: float = 0.0
     have_fix: bool = False
+    clear_until: float | None = None  # steer-inhibit deadline after a gate pass
+    yaw_cmd: float = 0.0             # previous yaw command, for the slew limit
     sweep_pos: float = 0.0           # commanded yaw accumulated while searching
     sweep_dir: float = 1.0
     sweep_limit: float | None = None
@@ -169,6 +183,15 @@ class ServoOutput:
     vertical: float      # vertical effort around hover, [-1, 1]
     yaw_rate: float      # rad/s
     have_target: bool
+
+
+def _slew(state: ServoState, cfg: ServoConfig, want: float, dt: float) -> float:
+    """Rate-limit the yaw command so no single sighting can snap the aircraft."""
+    if dt <= 0.0:
+        return state.yaw_cmd
+    step = cfg.max_yaw_accel * dt
+    state.yaw_cmd += clamp(want - state.yaw_cmd, -step, step)
+    return state.yaw_cmd
 
 
 def _continuous(state: ServoState, cfg: ServoConfig, t: float,
@@ -247,8 +270,11 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
     # than the control loop) detector survivable.
     if state.have_fix and state.time_since_seen <= cfg.hold_s:
         stale = not usable
-        yaw_rate = clamp(cfg.kp_yaw * state.az_f + cfg.kd_yaw * state.az_rate,
+        want_yaw = clamp(cfg.kp_yaw * state.az_f + cfg.kd_yaw * state.az_rate,
                          -cfg.max_yaw_rate, cfg.max_yaw_rate)
+        if state.clear_until is not None and t < state.clear_until:
+            want_yaw = 0.0            # clearing the gate we just passed
+        yaw_rate = _slew(state, cfg, want_yaw, dt)
 
         el_err = state.el_f - cfg.el_setpoint_rad
         vertical = clamp(cfg.kp_el * el_err + cfg.kd_el * state.el_rate,
@@ -293,16 +319,20 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
     # Vertical search oscillates, so a fruitless search does not walk the
     # aircraft into the floor (see search_descend).
     phase = 2.0 * math.pi * state.search_t / max(cfg.search_vert_period_s, 1e-3)
+    want_yaw = state.sweep_dir * cfg.search_yaw_rate
+    if state.clear_until is not None and t < state.clear_until:
+        want_yaw = 0.0
     return ServoOutput(
         tilt_fwd=cfg.search_creep,
         tilt_right=0.0,
         vertical=-cfg.search_descend * math.sin(phase),
-        yaw_rate=state.sweep_dir * cfg.search_yaw_rate,
+        yaw_rate=_slew(state, cfg, want_yaw, dt),
         have_target=False,
     )
 
 
-def gate_passed(state: ServoState) -> None:
+def gate_passed(state: ServoState, t: float | None = None,
+                cfg: ServoConfig | None = None) -> None:
     """Called when the sim's active_gate_index advances.
 
     Proof we are through, and the moment the old track becomes meaningless: it
@@ -322,3 +352,5 @@ def gate_passed(state: ServoState) -> None:
     state.sweep_pos = 0.0
     state.sweep_limit = None
     state.search_t = 0.0
+    if t is not None:
+        state.clear_until = t + (cfg or ServoConfig()).clear_gate_s

@@ -647,3 +647,39 @@ Nick's observation that gate 1 never entered the camera's view is the thing to
 confirm from vq2_frames8 — if gate 1 is genuinely outside a 90 deg HFoV cone
 tilted 20 deg up, no search tuning fixes it and the course geometry has to
 drive where we point the camera.
+
+## VQ2 official run 8 — gate 0 again, and the course turns RIGHT
+
+Gate 0 cleared for the second consecutive run, faster (3 log samples), and
+[GATE] passed 0 -> 1 fired correctly, clearing the stale track as intended.
+
+Then, one sample later, roll +174 and inverted.
+
+The important finding is about the COURSE, not the code. Immediately after the
+pass the detector reported u=609.6 rng=15.0 conf=0.74. That confidence is
+exactly the detector's own edge-fade at u=609 (min(609, 639-609)=30, 30/40 =
+0.75), which means the sighting is a gate ~15 m away at 42 deg to the RIGHT —
+inside the 90 deg HFoV, just at its edge. That is almost certainly gate 1.
+
+So Nick's "gate 1 never entered the camera's POV" is nearly right but the
+consequence is the opposite of what I assumed: gate 1 IS visible, at the far
+right edge, because the course turns hard right after gate 0. The target
+selection was correct. The RESPONSE was fatal:
+
+  * az=42 deg * kp_yaw 2.0 = 1.47 rad/s, essentially saturated, commanded in a
+    SINGLE control step with no slew limit.
+  * Applied ~1 m past the gate plane, with gate 0's posts still alongside. A
+    hard yaw there clips a post — which is what roll +174 is.
+
+Fixes (deliberately NOT raising acquire_confidence, which would have rejected
+the correct gate-1 sighting at 0.74 and made this worse):
+  * max_yaw_accel = 2.2 rad/s^2 slew limit on the yaw command, so no single
+    sighting can snap the aircraft.
+  * clear_gate_s = 0.45 s of straight flight after a gate pass before any
+    steering. Tracking continues through it; only steering is inhibited.
+
+Test asserts all three properties: zero steering during clearance, yaw accel
+within the limit, and that it still does turn (settles at +1.47 rad/s).
+
+Course knowledge gained: gate 0 sits ~2.4 m above the start pad, and gate 1 is
+roughly 15 m from gate 0 at about 42 deg to the right.

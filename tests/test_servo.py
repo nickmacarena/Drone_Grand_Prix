@@ -131,6 +131,9 @@ def main():
                           enu=False)
         check(name, ok, f"closest approach {best:.2f} m")
 
+    print("\n[post-gate handling — official run 8 regression]")
+    test_no_slam_after_gate_pass()
+
     print("\n[search behaviour — official run 7 regression]")
     test_search_is_bounded()
     test_gate_passed_clears_stale_track()
@@ -294,6 +297,50 @@ def test_gate_passed_clears_stale_track():
     servo.gate_passed(st)
     check("track cleared by gate pass", not st.have_fix)
     check("bearing prior re-centred", st.az_f == 0.0 and st.last_az == 0.0)
+
+
+def test_no_slam_after_gate_pass():
+    """Official run 8: acquired gate 1 at 42 deg right and snapped over.
+
+    The sighting was legitimate — the course turns hard right after gate 0, and
+    u=609 with conf=0.74 is exactly the detector's edge-fade at that position.
+    What killed it was commanding 1.47 rad/s in one step, 1 m past the gate
+    plane with gate 0's posts still alongside. It clipped one and inverted.
+
+    So: steer toward it, but not instantly, and not while still in the gate.
+    """
+    cfg = servo.ServoConfig()
+    st = servo.ServoState()
+    dt = 0.02
+    t = 0.0
+    servo.gate_passed(st, t, cfg)
+
+    az_edge = math.atan2((609.6 - 320.0) / 320.0, 1.0)      # 42 deg
+    tgt = servo.Target(az=az_edge, el=0.0, confidence=0.74, range_m=15.0)
+
+    # First moments after the pass: tracking may start, steering must not.
+    peak_during_clear = 0.0
+    while t < cfg.clear_gate_s:
+        out = servo.step(st, cfg, t, tgt)
+        peak_during_clear = max(peak_during_clear, abs(out.yaw_rate))
+        t += dt
+    check("no steering while clearing the gate", peak_during_clear < 0.05,
+          f"peak yaw {peak_during_clear:.3f} rad/s during clearance")
+
+    # After clearance it should turn toward the gate, but smoothly.
+    worst_jump = 0.0
+    prev = out.yaw_rate
+    for _ in range(60):
+        out = servo.step(st, cfg, t, tgt)
+        worst_jump = max(worst_jump, abs(out.yaw_rate - prev) / dt)
+        prev = out.yaw_rate
+        t += dt
+    check("yaw slews rather than snapping",
+          worst_jump <= cfg.max_yaw_accel * 1.05,
+          f"peak yaw accel {worst_jump:.2f} rad/s^2 "
+          f"(limit {cfg.max_yaw_accel})")
+    check("it does eventually turn toward the gate", out.yaw_rate > 0.3,
+          f"yaw settled at {out.yaw_rate:+.2f} rad/s")
 
 
 if __name__ == "__main__":
