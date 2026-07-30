@@ -154,7 +154,17 @@ ATT_P = 5.0               # rad/s of body rate per rad of attitude error
 MAX_RATE = 3.0
 VERT_AUTH_FRAC = 0.8      # thrust = hover * (1 + frac * vertical_effort)
 THRUST_MIN, THRUST_MAX = 0.02, 0.90
-MAX_TILT_RAD = math.radians(20)
+# 20 deg capped every horizontal authority we have, and run 13 showed the cost:
+# brake_tilt 0.45 of 20 deg is a 9 deg nose-up command = g*tan(9) = 1.55 m/s^2,
+# so shedding the ~8 m/s carried through gate 0 would take 5.1 s with about 1 s
+# available. The brake fired (pitch reached +6.9) and was simply too weak to
+# matter. At 35 deg, braking at 0.85 gives 5.6 m/s^2 (1.4 s) and crossrange at
+# 0.60 gives 3.8 m/s^2, roughly triple what we had.
+#
+# Vertical cost is affordable: at 30 deg the thrust vector loses cos(30)=0.87 of
+# its lift, needing 1.15x hover, and the vertical channel already reaches 1.56x.
+MAX_TILT_RAD = math.radians(35)
+BRAKE_TILT_RAD = math.radians(30)   # nose-UP while braking: g*tan(30) = 5.7 m/s^2
 
 
 class ControllerVQ2:
@@ -545,7 +555,13 @@ class ControllerVQ2:
         out = servo.step(self.servo_state, self.servo_cfg, t, target)
         if not out.have_target:
             return 0.0, 0.0, 0.0, self.hover
-        pitch = -MAX_TILT_RAD * out.tilt_fwd     # nose down = negative FRD pitch
+        if out.braking:
+            # Absolute brake angle, independent of the servo's normalized scale.
+            # Run 13 braked at 9 deg (1.55 m/s^2) and needed 5.1 s to shed the
+            # ~8 m/s carried through gate 0, with ~1 s available.
+            pitch = BRAKE_TILT_RAD
+        else:
+            pitch = -MAX_TILT_RAD * out.tilt_fwd  # nose down = negative FRD pitch
         roll = MAX_TILT_RAD * out.tilt_right
         thrust = _clamp(self.hover * (1.0 + VERT_AUTH_FRAC * out.vertical),
                         THRUST_MIN, THRUST_MAX)

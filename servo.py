@@ -241,6 +241,14 @@ class ServoOutput:
     vertical: float      # vertical effort around hover, [-1, 1]
     yaw_rate: float      # rad/s
     have_target: bool
+    braking: bool = False   # decelerating into a turn. WHEN to brake is servo
+                            # policy; HOW HARD is plant-specific, because the
+                            # two sims scale tilt_fwd differently — Elodin feeds
+                            # it straight to its mixer while the official sim
+                            # multiplies by MAX_TILT_RAD. Setting brake_tilt to
+                            # 0.85 for the sim's sake took the VQ1 replica from
+                            # 6/6 to 2/6 in Elodin, which is the mismatch, not a
+                            # disagreement about policy.
 
 
 def _slew(state: ServoState, cfg: ServoConfig, want: float, dt: float) -> float:
@@ -353,14 +361,14 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
             drive *= cfg.hold_drive_decay
         else:
             drive *= max(cfg.min_tilt_frac, confidence)
-        # Approaching this gate with a sharp turn known to follow: shed speed
-        # now rather than discovering the problem on the far side.
-        if (state.hint_az is not None
-                and abs(state.hint_az) > cfg.brake_az_rad
-                and t - state.hint_t <= cfg.hint_max_age_s
-                and state.rng_f is not None
-                and state.rng_f < cfg.pre_brake_range_m):
-            drive *= cfg.pre_brake_frac
+        # NOTE: pre-emptive braking on a next-gate hint was tried here and
+        # REVERTED. It looked principled — we know a sharp turn is coming before
+        # we reach the current gate — but it took the VQ1 replica from 6/6 to
+        # 2/6, and I had only tested it on vq2turn. On a course where the
+        # detector regularly sees distant gates at wide bearings, the hint is
+        # almost always "sharp turn ahead", so it crawled into every gate.
+        # Any revival needs the hint to be attributable to the NEXT gate
+        # specifically, which nothing currently establishes.
         # Far off axis: stop adding speed and start removing it, so the turn can
         # actually be flown before the target leaves the FOV.
         braking = abs(state.az_f) > cfg.brake_az_rad
@@ -374,6 +382,7 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
             vertical=vertical,
             yaw_rate=yaw_rate,
             have_target=True,
+            braking=braking,
         )
 
     # ── Properly lost: hold level, stop climbing, sweep toward last sight ──

@@ -974,3 +974,48 @@ Changes:
 Elodin, both courses still complete — slower, as braking implies:
     vq2turn  4/4  19.23s -> 24.92s
     vq1      6/6  55.85s -> 58.96s
+
+## VQ2 official run 13 — the brake fired and was far too weak
+
+Nick: "Looks like it didn't slow down nearly enough?" Exactly right, with numbers:
+brake_tilt 0.45 of a 20 deg MAX_TILT_RAD is a 9 deg nose-up command, giving
+g*tan(9) = 1.55 m/s^2. Shedding the ~8 m/s carried through gate 0 needs 5.1 s and
+about 1 s was available. The log confirms it engaged (pitch reached +6.9, nose-up)
+and simply did not matter.
+
+MAX_TILT_RAD = 20 deg was capping every horizontal authority at once — braking,
+crossrange, all of it. Raised to 35 deg. Vertical cost is affordable: at 30 deg
+the thrust vector loses cos(30)=0.87 of its lift, needing 1.15x hover, and the
+vertical channel already reaches 1.56x.
+
+Braking is now DECOUPLED from the servo's normalized scale. The two harnesses
+interpret tilt_fwd differently — Elodin feeds it straight to its motor mixer while
+the official sim multiplies by MAX_TILT_RAD — so raising brake_tilt to 0.85 for
+the sim's benefit meant "85% of full mixer authority" in Elodin. ServoOutput now
+carries a `braking` flag: WHEN to brake is servo policy, HOW HARD is plant
+specific (BRAKE_TILT_RAD = 30 deg => 5.7 m/s^2 => 1.4 s to shed 8 m/s).
+
+TWO REGRESSIONS, one of them mine to own:
+
+1. brake_tilt 0.85 took the VQ1 replica 6/6 -> 2/6. Explained by the scaling
+   mismatch above, and fixed by decoupling.
+
+2. It was still 2/6 after that fix, so the first diagnosis was wrong. The real
+   culprit was PRE-EMPTIVE BRAKING, which I had added and tested ONLY on vq2turn,
+   never on vq1. It looked principled — the next-gate hint tells us a sharp turn
+   is coming before we reach the current gate — but on a course where the detector
+   regularly sees distant gates at wide bearings, the hint is almost always
+   "sharp turn ahead", so it crawled into every gate. Reverted.
+
+   Reviving it requires attributing the hint to the NEXT gate specifically, which
+   nothing in the current design establishes. A confident sighting that is not the
+   tracked gate could be the next gate, a previous one, or any of the hangar's
+   ceiling gates.
+
+The lesson is the cheap one: run BOTH courses after every servo change. Testing
+only the course a change was designed for is how a change that helps one case
+silently destroys another.
+
+Elodin, both courses passing again:
+    vq1      6/6  COMPLETE  58.96s
+    vq2turn  4/4  COMPLETE  24.92s
