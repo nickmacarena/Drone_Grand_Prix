@@ -1339,3 +1339,46 @@ Open questions this run should answer:
   * does rail separation track height above the floor? If so it is an ALTITUDE
     estimate, which VQ2 does not provide and whose absence has caused a third of
     our crashes.
+
+## Corridor run 1 (MISSION=corridor) — the corridor runs the whole course
+
+38 frames from the official sim, replayed offline with tools/replay_frames.py
+--corridor. Both open questions answered.
+
+1. PRE-RACE CYAN IS FINE. Frames 1-8 give lat=+0.1 px and 2-18% cyan, identical
+   to run 6. The live log's "cyan=0.00%" was reading frames that had not rendered
+   yet, not a detector failure. Nothing to fix.
+
+2. THE CORRIDOR CONTINUES PAST GATE 0. Frame 13 is decisive: the aircraft is at
+   gate 0 with orange filling the left edge, and the cyan corridor sweeps RIGHT
+   and runs on into the distance past several more gates. One continuous ribbon
+   through the course. In the live log it "vanished" only because the aircraft had
+   already crashed.
+
+   In flight the lookahead behaved as it did offline: +9.5 -> +43.8 px across
+   frames 10-13, announcing the right-hander while gate 0 was still ahead.
+
+THREE CORRECTIONS TO THE PLAN:
+
+  * It is a CURVED RIBBON, not two straight parallel rails. The
+    leftmost/rightmost-per-row method tracks the bend accurately, but "width"
+    means ribbon width, which is why w_near was so erratic (363 -> 126 -> 57 ->
+    135). DROP the altitude-from-rail-separation idea: the width is dominated by
+    how much near field is in frame, not by height above the floor.
+
+  * FRAMES 36-37 ARE A TRAP. They report the highest coverage in the whole set
+    (0.91 and 1.00, 4.4% and 13.1% cyan) and they are the aircraft lying INVERTED
+    after the crash — ceiling panels visible top and bottom. lat=+78.3 there is
+    meaningless. Without an attitude gate, the best-looking corridor measurements
+    in a run are the ones taken after it ended. The IMU attitude is available, so
+    the corridor must be refused when |roll| exceeds ~45 deg.
+
+  * Only 5 valid in-flight frames (9-13) because the whole flight lasted about
+    1.5 s. Flying slowly, which the no-time-limit answer permits, would multiply
+    the data from a single run.
+
+VERDICT: the corridor is good enough to navigate on. It is continuous, unambiguous
+(there is only one), covers 2-18% of the frame against a gate blob's <1%, and
+shows the upcoming turn before the current gate is passed. Every recurring failure
+of the last twenty runs is downstream of navigating by orange blobs; none of them
+apply here.
