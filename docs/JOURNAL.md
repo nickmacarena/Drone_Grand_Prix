@@ -1281,3 +1281,61 @@ job; the generating process is the problem.
 
 Current state, both Elodin courses passing: vq1 6/6 57.49s, vq2turn 4/4 21.20s.
 Twenty official runs: gate 0 reliable, gate 1 never reached.
+
+## Corridor detection: the cyan floor guide as a navigation primitive
+
+Nick raised the cyan floor lines and confirmed there is no time limit. Both
+change the problem, and the second one especially: nearly every crash since run
+12 traces to arriving somewhere too fast to correct, and speed was only ever
+there because I assumed racing mattered.
+
+WHAT THE CYAN ACTUALLY IS. Two bright cyan stripes painted on the hangar floor
+running the length of the course ("rails"), with the lane between them being the
+route ("corridor"). Separately, a cyan ribbon is visible THROUGH the gate opening
+showing where the course continues. Those are my names, not the sim's.
+
+Measured on frame 9 of run 6, taking the midpoint of the leftmost and rightmost
+cyan pixel per image row:
+    row    left  right  width  centre
+    350      69    573    504     321
+    320      94    548    454     321
+    280     128    514    386     321
+    240     161    480    319     320
+    200     196    446    250     321
+    170     222    420    198     321
+Lane centre is 320-321 at every row against an image centre of 320. Six
+independent estimates agreeing to a pixel, versus a gate centroid that jitters by
+tens of pixels and periodically jumps to a different object.
+
+Do NOT use the row-wise centroid of cyan pixels: it is dragged by the ribbon and
+by one rail having more pixels than the other. Leftmost-to-rightmost midpoint is
+what gives the +-1 px stability.
+
+corridor.py measured across all 47 run-6 frames, 12.5 ms/frame (the gate detector
+is 14 ms):
+    frames 1-8, stationary on the pad:  lateral +0.1 px, repeated exactly
+    frame 9,  race start:               +1.0
+    frame 11, still approaching gate 0: +20.8 px, LOOKAHEAD +85.7 px
+    frame 12, gate filling the view:    coverage collapses to 0.14
+Frame 11 is the important one: the right-hander is announced while gate 0 is
+still ahead of us. Twelve runs have died because gate 1 is only visible at the
+frame edge for about two metres AFTER the pass. This sees the turn before it.
+
+Coverage collapsing at frame 12 is expected and fine — that is the point where
+the gate itself is the better cue anyway.
+
+WHY THIS MATTERS ARCHITECTURALLY. Every recurring failure of the last twenty runs
+— impostor tracks, the continuity gate eating itself, ceiling gates, the reject
+timeout thrash, the two-metre window — is downstream of navigating by orange
+blobs in a hangar full of identical orange gates. None of them exist for a
+corridor there is only one of.
+
+MISSION=corridor flies exactly like race and only LOGS the corridor; it touches no
+control output. Deliberate: find out whether +-0.1 px survives real flight, and
+whether the corridor continues past gate 0, before rebuilding navigation on it.
+
+Open questions this run should answer:
+  * does the corridor persist along the whole course, or only near the start?
+  * does rail separation track height above the floor? If so it is an ALTITUDE
+    estimate, which VQ2 does not provide and whose absence has caused a third of
+    our crashes.

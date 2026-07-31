@@ -35,9 +35,13 @@ class _Any(types.ModuleType):
         return v
 
 
-for _m in ("numpy", "PIL", "PIL.Image", "pymavlink", "pymavlink.mavutil"):
+for _m in ("numpy", "PIL", "PIL.Image", "pymavlink", "pymavlink.mavutil",
+           "corridor"):
     sys.modules.setdefault(_m, _Any(_m))
 sys.modules["pymavlink"].mavutil = sys.modules["pymavlink.mavutil"]
+
+# corridor is numpy-heavy; stub its one entry point so the mission still runs.
+sys.modules["corridor"].detect_corridor = lambda frame: None
 
 import controller_vq2 as C          # noqa: E402
 from state import HeartbeatStatus, ImuSample, RaceStatus, SharedState  # noqa: E402
@@ -128,7 +132,7 @@ def fly(mission, steps=1400, gate_visible=True, plant_standard=True,
 def main():
     print("=== controller smoke (no simulator) ===\n")
 
-    for mission in ("hover", "race", "yawtest"):
+    for mission in ("hover", "race", "yawtest", "corridor"):
         try:
             ctl, thrusts = fly(mission)
             ok = len(thrusts) > 0

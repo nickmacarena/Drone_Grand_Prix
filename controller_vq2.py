@@ -30,6 +30,7 @@ from dataclasses import replace
 
 from attitude import quat_rotate
 from bearing import AIGP_CAM, stabilized_bearing
+from corridor import detect_corridor
 from detector import detect_gate
 from mavlink_tx import send_arm, send_attitude_rates
 from state import SharedState
@@ -85,6 +86,13 @@ YAW_SIGN = -1.0
 
 # MISSION=yawtest: isolate rotation from translation (see _yaw_test_step).
 YAW_AUTOFLIP = os.environ.get("YAW_AUTOFLIP", "0") == "1"
+
+# MISSION=corridor flies exactly like race but also measures the cyan floor
+# corridor and logs it. Purely observational: the corridor does not touch a
+# single control output yet. The point is to find out whether the +-0.1 px lane
+# centre measured on saved frames survives real flight, and whether the corridor
+# continues past gate 0, BEFORE navigation is rebuilt on top of it.
+CORRIDOR_LOG = MISSION == "corridor"
 
 YAWTEST_RATE = 1.2         # rad/s — fast, so rotation dominates translation
 YAWTEST_S = 5.0            # rotate for this long
@@ -191,6 +199,7 @@ class ControllerVQ2:
         self._last_gate_index = None
         self._yaw_chk = servo.PolarityCheck()
         self._last_braking = False
+        self._last_corr = None
         self._yawtest_t0 = None
         self._yawtest_samples = []
         self._yawtest_last_report = 0.0
@@ -226,6 +235,7 @@ class ControllerVQ2:
         self._last_frame_seen = None
         self._last_obs = None
         self._detect_err_logged = False
+        self._corr_err_logged = False
 
     # ── main loop ────────────────────────────────────────────────────
     def arm(self):
@@ -316,7 +326,7 @@ class ControllerVQ2:
                       f"starting mission", flush=True)
             return 0.0, 0.0, 0.0, self._damped_hover()
 
-        if MISSION == "race":
+        if MISSION in ("race", "corridor"):
             return self._race_step(t)
         if MISSION == "yawtest":
             return self._yaw_test_step(t)
@@ -558,6 +568,14 @@ class ControllerVQ2:
                     self._detect_err_logged = True
                     print(f"  [DETECT] error: {e}", flush=True)
             self._last_obs = obs
+            if CORRIDOR_LOG:
+                try:
+                    self._last_corr = detect_corridor(frame)
+                except Exception as e:
+                    self._last_corr = None
+                    if not self._corr_err_logged:
+                        self._corr_err_logged = True
+                        print(f"  [CORRIDOR] error: {e}", flush=True)
         obs = self._last_obs
         if obs is not None:
             az, el = stabilized_bearing(self.cam, obs, self.est.q, self.up_world)
@@ -626,6 +644,21 @@ class ControllerVQ2:
         trk += (f"fix={'Y' if st.have_fix else 'n'} rej={st.rejected} "
                 f"{'SRCH' if st.searching else '    '}"
                 f"{' BRK' if self._last_braking else '    '}")
+        if CORRIDOR_LOG:
+            k = self._last_corr
+            if k is None or not k.valid:
+                cov = k.coverage if k else 0.0
+                cy = k.cyan_frac * 100.0 if k else 0.0
+                print(f"  [COR] no corridor  cov={cov:.2f} cyan={cy:.2f}%",
+                      flush=True)
+            else:
+                look = k.lookahead_px
+                lk = f"{look:+6.1f}" if not math.isnan(look) else "   ---"
+                print(f"  [COR] lat={k.lateral_px:+6.1f}px "
+                      f"({math.degrees(k.lateral_rad):+5.1f}deg) look={lk}px "
+                      f"w_near={k.width_near:5.0f} cov={k.coverage:.2f} "
+                      f"cyan={k.cyan_frac * 100:5.2f}% rows={len(k.rows)}",
+                      flush=True)
         print(f"  [VQ2] {MISSION} {att} a_up={a_up:+5.2f} thr={thrust:.2f} "
               f"vz={self.vz_est:+5.2f} hov={hov} armed={hb.armed if hb else '?'} "
               f"gate={rs.active_gate_index if rs else '?'} "

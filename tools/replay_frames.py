@@ -26,6 +26,7 @@ from PIL import Image
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import corridor          # noqa: E402
 import detector          # noqa: E402
 import servo             # noqa: E402
 from bearing import AIGP_CAM, GateObservation, stabilized_bearing  # noqa: E402
@@ -36,6 +37,8 @@ def main() -> int:
     ap.add_argument("frame_dir")
     ap.add_argument("--servo", action="store_true",
                     help="also run the servo, showing accepted/rejected sightings")
+    ap.add_argument("--corridor", action="store_true",
+                    help="measure the cyan floor corridor instead of gates")
     args = ap.parse_args()
 
     d = pathlib.Path(args.frame_dir)
@@ -44,6 +47,30 @@ def main() -> int:
     if sidecar.exists():
         labels = {json.loads(l)["i"]: json.loads(l)
                   for l in sidecar.read_text().splitlines() if l.strip()}
+
+    if args.corridor:
+        print(f"{'frm':>4} {'run':>5} {'valid':>6} {'lat_px':>7} {'look':>7} "
+              f"{'w_near':>7} {'cov':>5} {'cyan%':>6}")
+        print("-" * 54)
+        t0, n = time.time(), 0
+        for p in sorted(d.glob("frame_*.jpg")):
+            i = int(p.stem.split("_")[1])
+            lab = labels.get(i, {})
+            k = corridor.detect_corridor(
+                np.asarray(Image.open(p).convert("RGB")))
+            n += 1
+            run = str(lab.get("race_started", ""))[:5]
+            if not k.valid:
+                print(f"{i:>4} {run:>5} {'no':>6} {'':>7} {'':>7} {'':>7} "
+                      f"{k.coverage:5.2f} {k.cyan_frac * 100:5.2f}%")
+                continue
+            look = k.lookahead_px
+            lk = f"{look:+7.1f}" if not math.isnan(look) else "    ---"
+            print(f"{i:>4} {run:>5} {'YES':>6} {k.lateral_px:+7.1f} {lk} "
+                  f"{k.width_near:7.0f} {k.coverage:5.2f} "
+                  f"{k.cyan_frac * 100:5.2f}%")
+        print(f"\n{n} frames, {(time.time() - t0) / max(n, 1) * 1000:.1f} ms/frame")
+        return 0
 
     cfg, state = servo.ServoConfig(), servo.ServoState()
     hdr = f"{'frm':>4} {'gate':>4} {'run':>5} | {'u':>6} {'v':>6} {'w_px':>6} {'rng':>6} {'conf':>5}"
