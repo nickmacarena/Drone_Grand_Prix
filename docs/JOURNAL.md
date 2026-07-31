@@ -1429,3 +1429,37 @@ Refused above 45 deg of roll or pitch.
 Elodin, both courses COMPLETE and much slower, as intended:
     vq1      6/6  57.49s -> 78.48s
     vq2turn  4/4  21.20s -> 54.49s
+
+## Slow-flight run 1 on the official sim — braking worked, and did not help
+
+The changes took effect: BRK is set on the first flight sample and pitch reaches
++29.9 deg, the full BRAKE_TILT_RAD nose-up. It braked as designed and still hit
+gate 0. Nick: "It flew super fast and crashed into the first gate."
+
+TWO THINGS THE DATA SUPPORTS:
+
+1. THE CORRIDOR WORKS IN FLIGHT. On the one upright frame before the crash:
+       [COR] lat=+5.1px (+0.9deg) look=-2.5px w_near=357 cov=1.00 cyan=2.52% rows=44
+   cov=1.00 — every one of 44 sampled rows measured, lane centre 5 px off centre.
+   The best corridor reading yet, and from a real flight frame rather than a
+   saved one. The attitude gate also behaved: "no corridor" on every subsequent
+   line, which is correct, since the aircraft was past 45 deg of roll.
+
+2. THE VERTICAL CHANNEL IS THE PROXIMATE KILLER, AGAIN. el=+37.8 deg at the FIRST
+   sighting (rng 4.8), then +51.3, with vz=+4.12 and the aircraft climbing into
+   the gate. Acquisition is capped at 18 deg, so it acquired something lower and
+   the track walked up — the same walk-up as run 19. The elevation continuity
+   gate slows that walk but does not stop it, because a gate genuinely does rise
+   in view as you close on it, and a rate limit cannot separate the two cases.
+
+WHAT I CANNOT EXPLAIN: why the ground to gate 0 was covered so quickly while
+braking throughout. The plausible reading is that the pad sits close enough to
+gate 0 that no braking authority helps, but I have made confident claims about
+speed before and been wrong, so this is recorded as unknown rather than acted on.
+
+Assessment: gate-blob navigation has now failed in enough distinct ways that
+patching it further is not the best use of runs. The corridor is measured,
+continuous, unambiguous, and just returned a perfect reading in flight. The plan
+agreed with Nick — corridor as primary steering, gates demoted to a terminal
+height cue and progress signal — is the next thing to build, and it removes the
+whole class of failure that the elevation walk-up belongs to.
