@@ -1382,3 +1382,50 @@ VERDICT: the corridor is good enough to navigate on. It is continuous, unambiguo
 shows the upcoming turn before the current gate is passed. Every recurring failure
 of the last twenty runs is downstream of navigating by orange blobs; none of them
 apply here.
+
+## Slow flight — and two latent bugs it exposed
+
+Nick confirmed VQ2 has no time limit. Nearly every crash since run 12 came from
+arriving somewhere too fast to correct, and that speed was only ever there because
+I assumed racing mattered.
+
+  cruise_tilt 0.55 -> 0.35, and max_closure 4.0 -> 1.25 measured (~2 m/s true;
+  range reads ~1.6x short because it divides the detected OUTER frame width by
+  the 1.5 m INNER opening).
+
+SPEED BRAKING IS A REGULATOR, NOT A TRANSIENT. Both brake reasons shared
+brake_max_s, so the speed brake quit after 0.7 s while still closing at 6 m/s —
+useless for the one job it exists for. Azimuth braking stays time-bounded (run 17
+showed it latching on forever); speed braking now holds until the speed is down.
+Test: 93% of a 3 s window while still closing, versus 18% for the azimuth case.
+
+Slow flight then exposed two bugs that momentum had been hiding:
+
+1. IT FLEW BACK THROUGH A GATE IT HAD ALREADY PASSED. In vq2turn it cleared gate 1
+   at (23.2,-10.7), swept round, and re-approached GATE 0 at (11.8,-1.1).
+   sweep_limit_max_rad was 3.4 rad, enough to point the aircraft back down the
+   course, after which the detector offers the nearest gate — behind us. There is
+   no notion of "gates behind us are not targets", so the sweep must not create
+   the opportunity: capped at 1.75 rad (+-100 deg). Momentum used to carry us
+   through a search; at 2 m/s nothing does.
+
+2. FORWARD TILT WAS DOING TWO JOBS AT ONCE. search_creep translates AND pitches
+   the nose down to see below the flight path, so cutting it (needed, or the
+   aircraft wanders 18 m during a search) blinded the search to low gates —
+   caught by the "gate below" case, which failed at 6.58 m. Descending physically
+   finds low gates without needing nose-down attitude, so search_descend goes
+   0.18 -> 0.30 and the two jobs are decoupled.
+
+Also: the kinematic servo test flew a fixed 8 m/s with a 25 s budget, set when the
+aim was to race. Updated to 3 m/s and 60 s, the regime actually flown. Worth being
+careful here — I first assumed the "gate below" failure was a stale time budget,
+and it was not: at 6.58 m it was a real capability loss, and the fix was bug 2
+rather than a looser test.
+
+Corridor also gets an attitude gate: run-22 frames 36-37 scored the best coverage
+in the set (0.91, 1.00) while lying inverted after the crash, reporting lat=+78 px.
+Refused above 45 deg of roll or pitch.
+
+Elodin, both courses COMPLETE and much slower, as intended:
+    vq1      6/6  57.49s -> 78.48s
+    vq2turn  4/4  21.20s -> 54.49s

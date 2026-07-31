@@ -94,6 +94,12 @@ YAW_AUTOFLIP = os.environ.get("YAW_AUTOFLIP", "0") == "1"
 # continues past gate 0, BEFORE navigation is rebuilt on top of it.
 CORRIDOR_LOG = MISSION == "corridor"
 
+# The corridor says nothing useful unless we are upright. Run-22 frames 36 and 37
+# scored the HIGHEST coverage of the whole set (0.91 and 1.00) while the aircraft
+# lay inverted after crashing, reporting lat=+78 px. Without this gate, the
+# best-looking corridor measurements in a run are the ones taken after it ended.
+CORR_MAX_ROLL_RAD = math.radians(45)
+
 YAWTEST_RATE = 1.2         # rad/s — fast, so rotation dominates translation
 YAWTEST_S = 5.0            # rotate for this long
 YAWTEST_MIN_RANGE = 8.0    # m; closer than this, translation contaminates
@@ -209,7 +215,12 @@ class ControllerVQ2:
         # from the detected OUTER frame width against the 1.5 m INNER opening so
         # it reads ~1.6x short — about 5 m/s in measured units. 4 m/s therefore
         # brakes this aircraft without touching Elodin's slower one.
-        self.servo_cfg = replace(servo.ServoConfig(), max_closure=4.0)
+        # ~2 m/s true. Range is derived from the detected OUTER frame width
+        # against the 1.5 m INNER opening, so it reads ~1.6x short: 1.25 m/s
+        # measured is about 2 m/s of real closure. Previously 4.0 (~6.4 m/s true),
+        # which was still fast enough that a 42 deg turn could not be flown before
+        # the next gate left the FOV.
+        self.servo_cfg = replace(servo.ServoConfig(), max_closure=1.25)
 
         self.hover = None if CALIBRATE else HOVER_DEFAULT
         self.vz_est = 0.0         # m/s, +up. IMU-integrated; damping only.
@@ -570,7 +581,12 @@ class ControllerVQ2:
             self._last_obs = obs
             if CORRIDOR_LOG:
                 try:
-                    self._last_corr = detect_corridor(frame)
+                    roll, pitch, _ = (self._est_euler() if self.est.initialized
+                                      else (0.0, 0.0, 0.0))
+                    if abs(roll) > CORR_MAX_ROLL_RAD or abs(pitch) > CORR_MAX_ROLL_RAD:
+                        self._last_corr = None   # not upright; see CORR_MAX_ROLL
+                    else:
+                        self._last_corr = detect_corridor(frame)
                 except Exception as e:
                     self._last_corr = None
                     if not self._corr_err_logged:

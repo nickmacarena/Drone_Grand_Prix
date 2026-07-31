@@ -108,7 +108,10 @@ class ServoConfig:
     max_lat: float = 0.60      # was 0.35, giving only ~1.2 m/s^2 of crossrange
 
     # Forward drive
-    cruise_tilt: float = 0.55        # normalized forward tilt when lined up
+    # Gentle by design. Nick confirmed VQ2 has NO TIME LIMIT, and nearly every
+    # crash since run 12 came from arriving somewhere too fast to correct. There
+    # was never a reason to accelerate hard; I had assumed racing mattered.
+    cruise_tilt: float = 0.35        # normalized forward tilt when lined up
     min_tilt_frac: float = 0.15      # floor so we never fully stall out
     align_falloff_rad: float = 0.60  # azimuth error that halves forward drive
 
@@ -241,7 +244,14 @@ class ServoConfig:
     search_yaw_rate: float = 0.55    # rad/s while sweeping
     sweep_limit_rad: float = 1.15    # first sweep: +/- 66 deg from the prior
     sweep_growth: float = 1.6        # widen on each reversal
-    sweep_limit_max_rad: float = 3.4 # eventually cover the full circle
+    # NOT the full circle. At 3.4 rad the sweep can point the aircraft back down
+    # the course, and the detector will then happily offer the nearest gate —
+    # one we have already passed. In Elodin vq2turn it cleared gate 1 at
+    # (23.2,-10.7), swept round, and flew back through GATE 0 at (11.8,-1.1).
+    # Momentum used to carry us forward through a search; at 2 m/s nothing does.
+    # There is no notion of "gates behind us are not targets", so the sweep must
+    # not create the opportunity.
+    sweep_limit_max_rad: float = 1.75  # +-100 deg from the heading at the pass
     # The camera is pitched 20 deg UP with a 58.7 deg vertical FOV, so nothing
     # more than ~9 deg below the flight path is visible at all. A pure yaw
     # sweep can therefore hunt forever past a gate that is simply below us
@@ -252,7 +262,12 @@ class ServoConfig:
     # descent rather than arresting it: run 7 sank from -1.1 to -9.4 m/s while
     # searching and never recovered. So oscillate instead of descending, and
     # spend equal time above the entry altitude, which nets to zero drift.
-    search_descend: float = 0.18     # peak vertical effort, either direction
+    # Raised from 0.18. Forward tilt was doing double duty — translating AND
+    # pitching the nose down to see below the flight path — so a gentler
+    # search_creep (needed so the aircraft does not wander 18 m during a search)
+    # blinded it to low gates. Physically descending finds them without needing
+    # nose-down attitude, which decouples the two jobs.
+    search_descend: float = 0.30     # peak vertical effort, either direction
     # Period matters as much as amplitude. At 2.4 s the excursion is only
     # ~0.65 m, which nets zero drift but cannot find a gate below the FOV's
     # -9 deg floor — the VQ1 replica descends 8.6 m between gates 1 and 2 and
@@ -260,7 +275,11 @@ class ServoConfig:
     # sweep down (the blind side) and then recovers it. sin() starts negative,
     # so the DOWN half comes first, which is where gates hide.
     search_vert_period_s: float = 6.0  # full down-then-up cycle
-    search_creep: float = 0.38       # NOT a token creep. Forward tilt pitches
+    # Must be LESS than cruise_tilt, or the aircraft translates faster while
+    # searching than while tracking — which is how it covered 18 m backwards
+    # between gates in vq2turn. It was 0.38 against a cruise of 0.55; cruise is
+    # now 0.35.
+    search_creep: float = 0.20       # NOT a token creep. Forward tilt pitches
                                      # the nose down, swinging the camera from
                                      # ~9 deg of downward view to ~23 deg. A
                                      # search that levels off SHRINKS the very
@@ -477,14 +496,21 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
         # see brake_max_s.
         # Two independent reasons to shed speed: badly mis-aimed, or closing too
         # fast to fly the next turn whatever the aim.
+        # Two brake reasons with different natures, and they must NOT share a
+        # timer. Azimuth braking is a TRANSIENT — run 17 showed it latching on
+        # forever when a target sat off-axis — so it stays time-bounded. Speed
+        # braking is a REGULATOR: it must hold until the speed is actually down.
+        # Sharing brake_max_s made it quit after 0.7 s while still closing at
+        # 6 m/s, which is useless for the one job it exists to do.
         too_fast = -state.rng_rate > cfg.max_closure
-        braking = (abs(state.az_f) > cfg.brake_az_rad or too_fast)
-        if braking:
+        braking_az = abs(state.az_f) > cfg.brake_az_rad
+        if braking_az:
             state.brake_t += dt
             if state.brake_t > cfg.brake_max_s:
-                braking = False       # bank the speed we shed and fly again
+                braking_az = False    # bank the speed we shed and fly again
         else:
             state.brake_t = 0.0
+        braking = braking_az or too_fast
         fwd = -cfg.brake_tilt if braking else cfg.cruise_tilt * drive
         if braking:
             # Do not ask for max climb while already 30 deg nose-up.
