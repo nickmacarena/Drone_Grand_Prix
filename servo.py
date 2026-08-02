@@ -90,6 +90,7 @@ class ServoConfig:
     # documented rather than half-done.
     kp_el: float = 0.8
     kd_el: float = 1.3
+    max_el_cmd_rad: float = 0.26     # 15 deg; see el_err in step()
     max_vertical: float = 0.7
     # Angles are LEVEL-frame (see bearing.stabilized_bearing), so 0 means
     # "gate at our own altitude" — no dependence on camera mounting tilt.
@@ -343,6 +344,10 @@ class ServoOutput:
                             # disagreement about policy.
 
 
+def _clamp_el(x: float, lim: float) -> float:
+    return -lim if x < -lim else lim if x > lim else x
+
+
 def _slew(state: ServoState, cfg: ServoConfig, want: float, dt: float) -> float:
     """Rate-limit the yaw command so no single sighting can snap the aircraft."""
     if dt <= 0.0:
@@ -471,7 +476,16 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
             want_yaw = 0.0            # clearing the gate we just passed
         yaw_rate = _slew(state, cfg, want_yaw, dt)
 
-        el_err = state.el_f - cfg.el_setpoint_rad
+        # Clamp the elevation used for the vertical command. At long range el is
+        # small and genuine (gate 0 reads +14 deg at the gun, 12 m out); at close
+        # range it blows up geometrically whatever the true miss, and the walk-up
+        # onto higher objects is indistinguishable from it. Runs 19, 21 and 24 all
+        # ended with el ramping past +50 deg and the aircraft climbing over the
+        # gate at max thrust. A fixed clamp separates the two cases without
+        # needing a range rule: it barely bites where el is real, and hard where
+        # it is an artefact.
+        el_err = (_clamp_el(state.el_f, cfg.max_el_cmd_rad)
+                  - cfg.el_setpoint_rad)
         vertical = clamp(cfg.kp_el * el_err + cfg.kd_el * state.el_rate,
                          -cfg.max_vertical, cfg.max_vertical)
 

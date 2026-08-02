@@ -1526,3 +1526,33 @@ so the corridor path is genuinely exercised.
 Standing lesson: after stubbing something out, check the stub still lets the code
 under test RUN. Grepping the test output for the behaviour (here, "LANE") is the
 cheap way to confirm it.
+
+## cornav run 1 — corridor steering WORKS; the vertical channel is now the sole failure
+
+LANE engaged for three consecutive samples and did its job:
+
+    [COR] lat= +0.0px look= +3.7px cov=0.82 rows=36   TRK az=+0.4 el= +2.9  LANE
+    [COR] lat= +3.0px look= +7.7px cov=0.66 rows=29   TRK az=+0.3 el=+22.9  LANE BRK
+    [COR] lat=+20.2px look=+28.9px cov=1.00 rows=44   TRK az=+3.1 el=+29.8  LANE BRK
+
+Lateral tracking held (0 -> 3 -> 20 px), the lookahead climbed +3.7 -> +28.9
+announcing the right-hander, and braking engaged. The corridor primitive works in
+closed loop on the official sim, not just on saved frames.
+
+And it isolates the remaining failure exactly. Steering is now the corridor's job
+and it is fine; the VERTICAL channel is still gate-driven, and el ran
++2.9 -> +22.9 -> +29.8 -> +53.2 deg with the aircraft climbing over gate 0. Same
+walk-up that ended runs 19 and 21. Splitting the responsibilities turned a
+confusing multi-cause failure into a single-cause one.
+
+Fix follows from geometry already established: at long range el is small and
+genuine (gate 0 reads +14 deg at the gun, 12 m out), while at short range it blows
+up whatever the true miss is — and a track walking onto a higher object is
+indistinguishable from that. A fixed clamp on the COMMANDED elevation separates
+the two without needing a range rule: it barely bites where el is real, and hard
+where it is an artefact. max_el_cmd_rad = 0.26 (15 deg).
+
+Test asserts both directions: 53 deg (run 19's actual figure) commands 0.21 rather
+than the 0.70 ceiling, while 10 deg still commands a real correction.
+
+Elodin both COMPLETE: vq1 6/6 77.01s, vq2turn 4/4 54.49s.

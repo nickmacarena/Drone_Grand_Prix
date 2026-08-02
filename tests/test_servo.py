@@ -142,6 +142,7 @@ def main():
     test_elevation_continuity()
     test_speed_braking()
     test_braking_is_bounded()
+    test_vertical_command_is_bounded()
     test_ceiling_gate_not_acquired()
 
     print("\n[post-gate handling — official run 8 regression]")
@@ -483,6 +484,38 @@ def test_braking_is_bounded():
           worst_vert_while_braking <= cfg.brake_vert_clamp + 1e-9,
           f"peak |vertical| {worst_vert_while_braking:.2f} "
           f"(clamp {cfg.brake_vert_clamp})")
+
+
+def test_vertical_command_is_bounded():
+    """A runaway elevation must not command a runaway climb (runs 19/21/24).
+
+    el ramping past +50 deg has ended three official runs, the aircraft climbing
+    over the gate at max thrust. At long range el is small and real; at short
+    range it blows up whatever the true miss, and a track walking onto a higher
+    object looks the same. Clamping the commanded elevation separates them.
+    """
+    cfg = servo.ServoConfig()
+    st = servo.ServoState()
+    st.have_fix = True
+    st.time_since_seen = 0.0
+    st.el_f = math.radians(53.0)          # run 19's actual figure
+    st.rng_f = 1.5
+    out = servo.step(st, cfg, 0.0, None)
+    ceiling = cfg.kp_el * cfg.max_el_cmd_rad
+    check("a 53 deg elevation does not command max climb",
+          out.vertical <= ceiling + 1e-6,
+          f"vertical={out.vertical:+.2f} (bound {ceiling:+.2f}, "
+          f"max_vertical {cfg.max_vertical})")
+
+    # ...while a genuine, modest elevation still commands a real correction.
+    st2 = servo.ServoState()
+    st2.have_fix = True
+    st2.time_since_seen = 0.0
+    st2.el_f = math.radians(10.0)
+    st2.rng_f = 12.0
+    out2 = servo.step(st2, cfg, 0.0, None)
+    check("a 10 deg elevation still climbs", out2.vertical > 0.05,
+          f"vertical={out2.vertical:+.2f}")
 
 
 def test_ceiling_gate_not_acquired():
