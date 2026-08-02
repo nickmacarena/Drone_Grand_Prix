@@ -1498,3 +1498,31 @@ this one has unit tests and nothing else. The proper fix is to synthesise a
 corridor in the Elodin harness from the true gate positions — the corridor is
 essentially the path through them — which would let both courses exercise the same
 control law. That is the next piece of work if cornav does not fly well.
+
+## cornav run 1 crashed on an unbound local — and the test was blind to it
+
+    UnboundLocalError: cannot access local variable 'thrust'
+
+The corridor branch returned `thrust` before it was computed. Trivial to fix
+(compute it first; the corridor overrides steering only and the gate keeps the
+vertical channel).
+
+The reason it SHIPPED is the part worth recording. The smoke test stubbed
+detect_corridor to return None, so cmd.have_lane was never true and the branch
+containing the bug never executed. The test was green and had no coverage of the
+code it existed to cover. A stub that skips the code under test is worse than no
+test at all, because it reads as coverage.
+
+Fixing that exposed a second layer: even with the stub returning a valid
+observation, the branch stayed unreachable, because CORRIDOR_LOG and CORRIDOR_NAV
+are computed at IMPORT time from MISSION. Production sets MISSION via env before
+import so that is correct there, but the test assigns C.MISSION afterwards, which
+leaves the flags stale. Exactly the late-binding trap that made an earlier test
+silently fly yaw_sign=-1 in all four cases.
+
+With both fixed, MISSION=cornav engages LANE on 13 log lines in the smoke test,
+so the corridor path is genuinely exercised.
+
+Standing lesson: after stubbing something out, check the stub still lets the code
+under test RUN. Grepping the test output for the behaviour (here, "LANE") is the
+cheap way to confirm it.

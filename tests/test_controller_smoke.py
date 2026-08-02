@@ -40,8 +40,23 @@ for _m in ("numpy", "PIL", "PIL.Image", "pymavlink", "pymavlink.mavutil",
     sys.modules.setdefault(_m, _Any(_m))
 sys.modules["pymavlink"].mavutil = sys.modules["pymavlink.mavutil"]
 
-# corridor is numpy-heavy; stub its one entry point so the mission still runs.
-sys.modules["corridor"].detect_corridor = lambda frame: None
+# corridor is numpy-heavy, so its entry point is stubbed — but the stub must
+# return a VALID observation. Returning None meant MISSION=cornav never entered
+# the corridor branch, and an unbound-local crash in there shipped to the sim
+# with the smoke test green. A stub that skips the code under test is worse than
+# no test, because it reads as coverage.
+class _FakeCorridor:
+    valid = True
+    lateral_rad = 0.05
+    lookahead_px = 20.0
+    coverage = 0.9
+    lateral_px = 16.0
+    width_near = 350.0
+    rows = ()
+    cyan_frac = 0.05
+
+
+sys.modules["corridor"].detect_corridor = lambda frame: _FakeCorridor()
 
 import controller_vq2 as C          # noqa: E402
 from state import HeartbeatStatus, ImuSample, RaceStatus, SharedState  # noqa: E402
@@ -81,6 +96,12 @@ def fly(mission, steps=1400, gate_visible=True, plant_standard=True,
     distinguish on the real sim.
     """
     C.MISSION = mission
+    # CORRIDOR_LOG/CORRIDOR_NAV are computed at import time from MISSION (which
+    # production sets via env before import), so assigning C.MISSION alone leaves
+    # them stale and the corridor branch stays unreachable. Same late-binding trap
+    # as the yaw_sign signature default.
+    C.CORRIDOR_LOG = mission in ("corridor", "cornav")
+    C.CORRIDOR_NAV = mission == "cornav"
     C.time.sleep = lambda _s: None          # no real-time pacing in tests
     clock = {"t": 1000.0}
     C.time.time = lambda: clock["t"]

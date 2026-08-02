@@ -627,6 +627,12 @@ class ControllerVQ2:
             pitch = BRAKE_TILT_RAD
         else:
             pitch = -FWD_TILT_RAD * out.tilt_fwd  # nose down = negative FRD pitch
+        # thrust BEFORE the corridor branch: the corridor overrides steering only,
+        # and the gate keeps the vertical channel. Computing it after meant the
+        # corridor return referenced an unbound local — which shipped, because the
+        # smoke test stubbed detect_corridor to None and so never entered here.
+        thrust = _clamp(self.hover * (1.0 + VERT_AUTH_FRAC * out.vertical),
+                        THRUST_MIN, THRUST_MAX)
         if CORRIDOR_NAV:
             k = self._last_corr
             lane = k.lateral_rad if (k is not None and k.valid) else None
@@ -646,8 +652,6 @@ class ControllerVQ2:
                 return (LAT_TILT_RAD * cmd.tilt_right, pitch_c,
                         cmd.yaw_rate, thrust)
         roll = LAT_TILT_RAD * out.tilt_right
-        thrust = _clamp(self.hover * (1.0 + VERT_AUTH_FRAC * out.vertical),
-                        THRUST_MIN, THRUST_MAX)
         return roll, pitch, out.yaw_rate, thrust
 
     # ── helpers ──────────────────────────────────────────────────────
