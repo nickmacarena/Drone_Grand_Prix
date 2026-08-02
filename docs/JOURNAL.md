@@ -1463,3 +1463,38 @@ continuous, unambiguous, and just returned a perfect reading in flight. The plan
 agreed with Nick — corridor as primary steering, gates demoted to a terminal
 height cue and progress signal — is the next thing to build, and it removes the
 whole class of failure that the elevation walk-up belongs to.
+
+## Corridor-primary steering (MISSION=cornav)
+
+Split into two pieces on purpose: corridor.py does the image processing and needs
+numpy; corridor_nav.py holds the control law and deliberately does not, so it is
+testable anywhere the rest of the pure-Python suite runs. The interface is three
+floats — lane bearing, lookahead bearing, coverage.
+
+The corridor decides WHERE TO GO. The gate is demoted to the vertical channel plus
+the progress signal, and braking still overrides pitch, because shedding speed
+outranks steering.
+
+Law: yaw and roll BOTH driven by the lane bearing (waiting for the nose to come
+round then for forward tilt to push the new way is what made every gate-servo turn
+go wide), plus a feed-forward term on the lookahead so a centred lane that BENDS
+still turns. That last part is the whole advantage over gate-chasing: the turn is
+taken before the next gate is reachable rather than after it has left the frame.
+Below min_coverage the lane is refused and the gate servo keeps flying.
+
+14 tests in tests/test_corridor_nav.py, all pure Python: sign conventions both
+ways, lookahead feed-forward, coverage gating, immediate hand-back when the
+corridor is lost, command limits, and closed-loop convergence (25 deg lane offset
+settles inside 0.44 deg).
+
+MISSIONS: race (gate servo, unchanged), corridor (flies like race, only MEASURES
+the lane), cornav (steers on it). Kept separate so the gate-servo baseline stays
+flyable and a bad outcome costs a run rather than the working configuration.
+
+LIMITATION, STATED PLAINLY: ELODIN CANNOT VALIDATE THIS. elodin_servo has no
+camera and no corridor, so both courses exercise the gate servo and say nothing
+about cornav. Every previous change was checked on two courses before flying;
+this one has unit tests and nothing else. The proper fix is to synthesise a
+corridor in the Elodin harness from the true gate positions — the corridor is
+essentially the path through them — which would let both courses exercise the same
+control law. That is the next piece of work if cornav does not fly well.

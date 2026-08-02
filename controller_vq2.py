@@ -30,6 +30,7 @@ from dataclasses import replace
 
 from attitude import quat_rotate
 from bearing import AIGP_CAM, stabilized_bearing
+import corridor_nav
 from corridor import detect_corridor
 from detector import detect_gate
 from mavlink_tx import send_arm, send_attitude_rates
@@ -92,7 +93,11 @@ YAW_AUTOFLIP = os.environ.get("YAW_AUTOFLIP", "0") == "1"
 # single control output yet. The point is to find out whether the +-0.1 px lane
 # centre measured on saved frames survives real flight, and whether the corridor
 # continues past gate 0, BEFORE navigation is rebuilt on top of it.
-CORRIDOR_LOG = MISSION == "corridor"
+# corridor: fly like race, only MEASURE the lane. cornav: actually steer on it.
+# Kept as separate missions so the gate-servo baseline stays flyable and a bad
+# outcome costs a run rather than the working configuration.
+CORRIDOR_LOG = MISSION in ("corridor", "cornav")
+CORRIDOR_NAV = MISSION == "cornav"
 
 # The corridor says nothing useful unless we are upright. Run-22 frames 36 and 37
 # scored the HIGHEST coverage of the whole set (0.91 and 1.00) while the aircraft
@@ -206,6 +211,9 @@ class ControllerVQ2:
         self._yaw_chk = servo.PolarityCheck()
         self._last_braking = False
         self._last_corr = None
+        self._corr_state = corridor_nav.CorridorState()
+        self._corr_cfg = corridor_nav.CorridorConfig()
+        self._last_lane = False
         self._yawtest_t0 = None
         self._yawtest_samples = []
         self._yawtest_last_report = 0.0
@@ -337,7 +345,7 @@ class ControllerVQ2:
                       f"starting mission", flush=True)
             return 0.0, 0.0, 0.0, self._damped_hover()
 
-        if MISSION in ("race", "corridor"):
+        if MISSION in ("race", "corridor", "cornav"):
             return self._race_step(t)
         if MISSION == "yawtest":
             return self._yaw_test_step(t)
@@ -619,6 +627,24 @@ class ControllerVQ2:
             pitch = BRAKE_TILT_RAD
         else:
             pitch = -FWD_TILT_RAD * out.tilt_fwd  # nose down = negative FRD pitch
+        if CORRIDOR_NAV:
+            k = self._last_corr
+            lane = k.lateral_rad if (k is not None and k.valid) else None
+            look_px = k.lookahead_px if (k is not None and k.valid) else float("nan")
+            look = (math.atan2(look_px / 320.0, 1.0)
+                    if not math.isnan(look_px) else None)
+            cov = k.coverage if k is not None else 0.0
+            cmd = corridor_nav.step(self._corr_state, self._corr_cfg, t,
+                                    lane, look, cov)
+            self._last_lane = cmd.have_lane
+            if cmd.have_lane:
+                # The corridor decides WHERE TO GO. The gate keeps the vertical
+                # channel (thrust below) and the progress signal; braking still
+                # overrides pitch, since shedding speed outranks steering.
+                pitch_c = (BRAKE_TILT_RAD if out.braking
+                           else -FWD_TILT_RAD * cmd.tilt_fwd)
+                return (LAT_TILT_RAD * cmd.tilt_right, pitch_c,
+                        cmd.yaw_rate, thrust)
         roll = LAT_TILT_RAD * out.tilt_right
         thrust = _clamp(self.hover * (1.0 + VERT_AUTH_FRAC * out.vertical),
                         THRUST_MIN, THRUST_MAX)
@@ -658,6 +684,7 @@ class ControllerVQ2:
                f"TRK az={math.degrees(st.az_f):+5.1f} el={math.degrees(st.el_f):+5.1f} "
                f"rng=  --- ")
         trk += (f"fix={'Y' if st.have_fix else 'n'} rej={st.rejected} "
+                f"{'LANE' if self._last_lane else '    '}"
                 f"{'SRCH' if st.searching else '    '}"
                 f"{' BRK' if self._last_braking else '    '}")
         if CORRIDOR_LOG:

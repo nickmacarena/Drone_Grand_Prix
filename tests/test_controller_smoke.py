@@ -132,7 +132,7 @@ def fly(mission, steps=1400, gate_visible=True, plant_standard=True,
 def main():
     print("=== controller smoke (no simulator) ===\n")
 
-    for mission in ("hover", "race", "yawtest", "corridor"):
+    for mission in ("hover", "race", "yawtest", "corridor", "cornav"):
         try:
             ctl, thrusts = fly(mission)
             ok = len(thrusts) > 0
