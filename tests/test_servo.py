@@ -141,6 +141,7 @@ def main():
     print("\n[target selection — official runs 13/15 regression]")
     test_elevation_continuity()
     test_speed_braking()
+    test_no_braking_at_the_gate()
     test_braking_is_bounded()
     test_vertical_command_is_bounded()
     test_ceiling_gate_not_acquired()
@@ -452,6 +453,44 @@ def test_speed_braking():
         held += bool(out.braking)
     check("speed braking is not time-bounded", held > 0.6 * n,
           f"braking on {held / n:.0%} of 3 s while still closing at 6 m/s")
+
+
+def test_no_braking_at_the_gate():
+    """Do not thread a 1.5 m opening at 30 deg nose-up (official run 26).
+
+    Braking commands BRAKE_TILT_RAD nose-up, which hangs the tail low. Run 26
+    passed gate 0 at pitch +30.0 and inverted one sample later — the same
+    immediate post-pass tumble as every run since 15. Braking is right on
+    approach and wrong at contact.
+    """
+    from dataclasses import replace
+    # max_closure defaults to OFF (plant-specific; controller_vq2 sets it), so
+    # the speed brake has to be configured for this test to exercise it at all.
+    cfg = replace(servo.ServoConfig(), max_closure=2.5)
+
+    # Far out and closing fast: brake.
+    st = servo.ServoState()
+    dt, rng = 0.05, 30.0
+    far_braked = False
+    for i in range(40):
+        rng = max(cfg.brake_inhibit_range + 2.0, rng - 6.0 * dt)
+        out = servo.step(st, cfg, i * dt,
+                         servo.Target(az=0.0, el=0.0, confidence=1.0,
+                                      range_m=rng))
+        far_braked = far_braked or out.braking
+    check("still brakes on the approach", far_braked)
+
+    # Now inside the commit range: no braking, whatever the closure.
+    near_braked = False
+    for i in range(40, 80):
+        rng = max(0.8, rng - 6.0 * dt)
+        out = servo.step(st, cfg, i * dt,
+                         servo.Target(az=0.0, el=0.0, confidence=1.0,
+                                      range_m=rng))
+        if rng < cfg.brake_inhibit_range:
+            near_braked = near_braked or out.braking
+    check("does not brake once committed to the gap", not near_braked,
+          f"inside {cfg.brake_inhibit_range} m")
 
 
 def test_braking_is_bounded():

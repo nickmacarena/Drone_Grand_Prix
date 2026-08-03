@@ -140,6 +140,13 @@ class ServoConfig:
     # below the threshold, and the aircraft sat at 30 deg nose-up while the
     # elevation channel commanded thr=0.39 max climb. Nose-up plus max climb with
     # a tilted thrust vector is how you depart controlled flight.
+    # Do not brake once committed to the gap. Braking commands 30 deg nose-up
+    # (BRAKE_TILT_RAD), which hangs the tail low — and threading a 1.5 m opening
+    # in that attitude is how the rear props find the bottom of the gate. Run 26
+    # passed gate 0 at pitch +30.0 and inverted one sample later, which is the
+    # same immediate post-pass tumble seen on every run since 15. Braking is
+    # correct on approach and wrong at contact.
+    brake_inhibit_range: float = 4.0  # m measured (~6 m true); see rng scaling
     brake_max_s: float = 0.7         # then resume forward drive regardless
     brake_vert_clamp: float = 0.25   # cap climb authority while braking
 
@@ -525,6 +532,9 @@ def step(state: ServoState, cfg: ServoConfig, t: float,
         else:
             state.brake_t = 0.0
         braking = braking_az or too_fast
+        if (state.rng_f is not None
+                and state.rng_f < cfg.brake_inhibit_range):
+            braking = False           # committed: fly through it level
         fwd = -cfg.brake_tilt if braking else cfg.cruise_tilt * drive
         if braking:
             # Do not ask for max climb while already 30 deg nose-up.

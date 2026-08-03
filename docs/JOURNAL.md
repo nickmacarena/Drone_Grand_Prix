@@ -1609,3 +1609,32 @@ is what overfitting to the last log looks like.
 
 Corridor navigation is now verified the way everything before it was: two courses,
 full suite, offline, before Nick spends a run.
+
+## cornav run 3 — the corridor is proven; braking INTO the gate is the last bug
+
+Best tracking of the project:
+    [COR] lat= -0.3px cov=1.00 cyan=6.66% rows=44   LANE
+    [COR] lat= +9.8px cov=0.89 cyan=3.48% rows=39   LANE BRK
+Lane centre held to a third of a pixel with every sampled row measuring. Gate 0
+passed. Then roll +174.6 one sample later — the same immediate post-pass tumble
+seen on every run since 15.
+
+What the attitude says about that tumble: the aircraft went through the gate at
+pitch +30.0 then +30.4. That is BRAKE_TILT_RAD at full deflection, i.e. it was
+threading a 1.5 m opening at 30 deg nose-up with the tail hanging low. That is a
+very good way to catch the bottom of the gate with the rear props, and it explains
+why the tumble is immediate and universal rather than gradual.
+
+Braking is correct on approach and wrong at contact. Suppressed inside
+brake_inhibit_range = 4.0 m measured (~6 m true): once committed, fly through
+level. Test asserts both halves — still brakes on the approach, never inside the
+commit range.
+
+Elodin unchanged by the fix, both still COMPLETE:
+    vq2turn  4/4  22.64s
+    vq1      6/6  64.58s
+
+Worth noting what the corridor bought: for the first time the failure is a single
+identifiable event with a physical mechanism, rather than a tangle of impostor
+tracks, elevation walk-ups and search thrash. Navigation being solid is what made
+the remaining bug legible.
