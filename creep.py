@@ -78,9 +78,13 @@ class CreepConfig:
     align_closure_stop: float = 0.6  # m/s measured; below this we are "stopped"
     align_az_tol_rad: float = 0.05   # ~3 deg
     align_el_tol_rad: float = 0.06   # ~3.5 deg
-    align_el_rate_tol: float = 0.05  # rad/s; commit only when el is STEADY, not
-                                     # merely small — a zero crossing at speed is
-                                     # not an alignment
+    # rad/s; commit only when el is STEADY, not merely small — a zero crossing at
+    # speed is not an alignment. MEASURED, not chosen: with az inside a degree and
+    # closure at zero, el_rate still jitters +-0.14 around zero, so a 0.05 bound
+    # reset the settle timer forever and ALIGN never committed. The point is to
+    # reject a SUSTAINED drift, and drift shows as a bias; jitter averages out. The
+    # 0.5 s settle window is what actually filters it.
+    align_el_rate_tol: float = 0.22
     align_settle_s: float = 0.5      # hold the tolerance this long before commit
     align_timeout_s: float = 25.0    # give up and re-seek
 
@@ -92,14 +96,28 @@ class CreepConfig:
     # -0.045 and the aircraft reversed 75 m down the course in Elodin. The test
     # reported that mean and it was read as "close to zero"; a systematically
     # negative mean is not close to zero, it is a direction.
-    transit_pulse_on_s: float = 0.45
-    transit_pulse_off_s: float = 0.45
+    # The period must exceed the ATTITUDE loop's settling time, or the command
+    # flips before the aircraft has reached the commanded tilt and it jitters in
+    # pitch without translating. At 0.45 s it wandered around the origin for 100 s
+    # with range stuck at 11-14 m; the residual asymmetry showed up as drift to
+    # y=-6.2 rather than progress. 1.5 s lets each phase actually establish:
+    # ~1.08 m/s^2 for 1.5 s gives ~1.6 m/s peak and ~3.6 m per cycle.
+    transit_pulse_on_s: float = 1.5
+    transit_pulse_off_s: float = 1.5
     transit_tilt: float = 0.45        # forward during the ON phase
-    transit_brake_tilt: float = 0.45  # nose-UP during the OFF phase
+    # COAST, do not reverse. Symmetric pulses cancel against drag: the forward
+    # phase builds a little speed, drag caps it, and the equal reverse phase pushes
+    # the aircraft straight back. In Elodin x oscillated +-0.5 m around the origin
+    # for 95 s with range pinned at 12.2-12.5 m. Drag is already the brake — level
+    # off and let it work, and displacement per cycle is strictly positive while
+    # speed stays bounded by how brief the ON phase is.
+    transit_brake_tilt: float = 0.0   # level during the OFF phase
     # MEASURED, not chosen. Creep covers ~0.33 m/s in Elodin, so 12 m to gate 0
     # takes ~36 s — and this was 30, so the timeout fired a few seconds before
     # arrival and threw it back to ALIGN, forever. The failure looked like "does
     # not translate"; it was translating fine and being interrupted.
+    transit_kp_el: float = 0.6       # altitude hold only, not gate chasing
+    transit_max_vertical: float = 0.15
     transit_timeout_s: float = 120.0  # no pass? back to ALIGN and try again
 
     # ── PIVOT ───────────────────────────────────────────────────────
@@ -120,6 +138,7 @@ class CreepState:
     settled_t: float = 0.0
     el_prev: float | None = None
     el_t: float | None = None
+    dbg_t: float = -1e9
     el_rate: float = 0.0
     gate_index: int | None = None
     pulse_t: float = 0.0
@@ -217,10 +236,21 @@ def step(state: CreepState, cfg: CreepConfig, t: float,
         # puts several m/s into the aircraft that no cruise setting removes.
         fwd = -cfg.align_brake_tilt if closure > cfg.align_closure_stop else 0.0
 
-        aligned = (abs(az) <= cfg.align_az_tol_rad
-                   and abs(el) <= cfg.align_el_tol_rad
-                   and abs(state.el_rate) <= cfg.align_el_rate_tol
-                   and closure <= cfg.align_closure_stop)
+        az_ok = abs(az) <= cfg.align_az_tol_rad
+        el_ok = abs(el) <= cfg.align_el_tol_rad
+        rate_ok = abs(state.el_rate) <= cfg.align_el_rate_tol
+        clos_ok = closure <= cfg.align_closure_stop
+        aligned = az_ok and el_ok and rate_ok and clos_ok
+        # `aligned` is an AND of four terms and the timeout message only showed
+        # three. Naming the failing one directly beats guessing at it, which has
+        # already cost three runs.
+        if VERBOSE and t - state.dbg_t >= 2.0:
+            state.dbg_t = t
+            print(f"  [ALIGN] az={math.degrees(az):+6.2f}{'ok' if az_ok else 'XX'} "
+                  f"el={math.degrees(el):+6.2f}{'ok' if el_ok else 'XX'} "
+                  f"elrate={state.el_rate:+6.3f}{'ok' if rate_ok else 'XX'} "
+                  f"clos={closure:5.2f}{'ok' if clos_ok else 'XX'} "
+                  f"settled={state.settled_t:.2f}", flush=True)
         state.settled_t = state.settled_t + dt if aligned else 0.0
         if state.settled_t >= cfg.align_settle_s:
             _enter(state, TRANSIT, t,
@@ -243,12 +273,24 @@ def step(state: CreepState, cfg: CreepConfig, t: float,
         if state.pulse_t >= period:
             state.pulse_t -= period
         on = state.pulse_t < cfg.transit_pulse_on_s
-        # Vision is IGNORED here: aligned at range, the right action is to fly
-        # straight and change nothing. Every gate crash came from reacting to a
-        # sighting inside the last two metres.
+        # STEERING is ignored here: aligned at range, the right action is to fly
+        # straight and not chase the bearing, because every gate crash came from
+        # reacting to a sighting inside the last two metres.
+        #
+        # ALTITUDE is different and must NOT be ignored. Commanding vertical=0
+        # means hover thrust, and hover thrust holds vertical VELOCITY, not
+        # height — the unobservable-vz problem again. The aircraft sank 3.4 m to
+        # the floor over 30 s and sat there, which is why it never translated.
+        # So the vertical channel stays live, on a small gain and a hard clamp:
+        # enough to hold height, far too little to reproduce the elevation
+        # walk-up that clamping was introduced to stop.
+        vert = 0.0
+        if el is not None:
+            vert = _clamp(cfg.transit_kp_el * _clamp(el, -0.2, 0.2),
+                          -cfg.transit_max_vertical, cfg.transit_max_vertical)
         return CreepCommand(
             tilt_fwd=cfg.transit_tilt if on else -cfg.transit_brake_tilt,
-            phase=TRANSIT, ignore_vision=True)
+            vertical=vert, phase=TRANSIT, ignore_vision=True)
 
     # ── PIVOT ───────────────────────────────────────────────────────
     if elapsed < cfg.pivot_min_s:

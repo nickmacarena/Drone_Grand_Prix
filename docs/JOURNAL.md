@@ -1700,3 +1700,42 @@ mystery into a sequence. Two findings:
    instrument first.
 
 race and cornav remain the flyable configurations and are untouched.
+
+## creep FLIES: align -> commit -> pass -> pivot, working end to end
+
+    [PHASE] ALIGN -> TRANSIT  t= 4.95  (aligned az=-0.6 el=-1.1 closure=0.00)
+    [PHASE] TRANSIT -> PIVOT  t=11.45  (gate 1 reached)
+    [PHASE] PIVOT -> SEEK     t=13.84
+    [PHASE] ALIGN -> TRANSIT  t=18.93  (aligned az=-1.3 el=+0.9 closure=0.00)
+    [PHASE] TRANSIT -> PIVOT  t=27.01  (gate 2 reached)
+    [PHASE] ALIGN -> TRANSIT  t=32.84  (aligned az=+0.4 el=+1.3 closure=0.00)
+
+Positions confirm real traversal: (0,0) -> (12.8,0.0) -> (18.5,-6.6) ->
+(25.0,-11.9), straight down the course and round the right-hander. Nick's
+sequence works exactly as described.
+
+FIVE BUGS, each a different cause behind the same symptom, each found by
+instrumenting rather than reasoning:
+  1. Unequal pulse impulses (0.45*0.45 vs 0.55*0.45) reversed it 75 m. My own
+     test printed the -0.045 bias and I read it as "close to zero".
+  2. TRANSIT timeout 30 s < the ~36 s the creep needs — interrupted just before
+     arrival, every time. "Does not translate" was "being interrupted".
+  3. ALIGN never committed: el_rate tolerance 0.05 set from theory when the
+     measured noise floor is +-0.14. Logging the four AND-terms separately named
+     it in one run, after three guesses had failed.
+  4. Pulse period shorter than the attitude loop's settling time — it jittered in
+     pitch without translating.
+  5. vertical=0 in TRANSIT means hover thrust, which holds vertical VELOCITY not
+     height: it sank 3.4 m to the floor and sat there. "Ignore vision" was too
+     broad — it must mean ignore STEERING, not stop holding altitude.
+  6. Symmetric pulses cancel against drag: forward builds speed, drag caps it,
+     the equal reverse pushes it back. x oscillated +-0.5 m for 95 s. COASTING
+     instead of braking makes displacement strictly positive while the 50% duty
+     cycle still bounds speed.
+
+DISK: the 163 GB that stopped work repeatedly was elodin writing a per-run
+telemetry database (betaflight_dbNNN, 2.6-3.7 GB EACH) into the sim directory,
+never cleaned up. Fifty runs filled a 926 GB disk. I blamed the sim logs twice
+and Downloads once, and had Nick delete caches, a Windows ISO and frame archives,
+while `du -sh ~/code/AIGP/elodin` would have answered it the first time.
+run_elodin.sh now removes them before and after every run (trap on EXIT).

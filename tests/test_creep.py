@@ -87,9 +87,16 @@ def main():
     st8 = creep.CreepState()
     drive(st8, cfg, [(0.01, 0.01, 1.0, 0.1, None, 0)] * 60)
     out, _ = drive(st8, cfg, [(0.9, math.radians(50.0), 1.0, 0.0, None, 0)] * 4)
-    check("TRANSIT ignores vision", out.ignore_vision
+    check("TRANSIT ignores STEERING", out.ignore_vision
           and out.tilt_right == 0.0 and out.yaw_rate == 0.0,
           f"az 52 deg / el 50 deg present, yaw={out.yaw_rate:+.2f}")
+    # ...but altitude is still held. vertical=0 means hover thrust, which holds
+    # vertical VELOCITY not height, and the aircraft sank 3.4 m to the floor.
+    check("TRANSIT still holds altitude", abs(out.vertical) > 0.01,
+          f"vert={out.vertical:+.3f} with el 50 deg")
+    check("TRANSIT altitude authority stays small",
+          abs(out.vertical) <= cfg.transit_max_vertical + 1e-9,
+          f"vert={out.vertical:+.3f} vs clamp {cfg.transit_max_vertical}")
 
     # Motion is a pulse: forward, then reverse, so speed cannot accumulate.
     fwds = []
@@ -100,19 +107,18 @@ def main():
         o = creep.step(st9, cfg, t, None, None, 0.0, 0.0, None, 0)
         fwds.append(o.tilt_fwd)
         t += 0.05
-    check("TRANSIT pulses forward and back",
-          max(fwds) > 0.1 and min(fwds) < -0.1,
+    check("TRANSIT pulses forward then coasts",
+          max(fwds) > 0.1 and min(fwds) >= -1e-9,
           f"range {min(fwds):+.2f}..{max(fwds):+.2f}")
-    # The two impulses must MATCH, or the aircraft drifts steadily in whichever
-    # direction wins. A mean of -0.045 reversed it 75 m down the Elodin course:
-    # a systematically signed mean is a direction, not "close to zero".
+    check("TRANSIT never commands reverse", min(fwds) >= -1e-9,
+          "symmetric pulses cancel against drag; coasting does not")
+    # Duty cycle bounds the speed: the aircraft accelerates for on_s and then
+    # coasts, so peak speed is roughly a * on_s however long TRANSIT lasts.
     net = sum(fwds) / len(fwds)
-    check("pulse impulses cancel", abs(net) < 0.02, f"mean tilt {net:+.4f}")
-    imp_on = cfg.transit_pulse_on_s * cfg.transit_tilt
-    imp_off = cfg.transit_pulse_off_s * cfg.transit_brake_tilt
-    check("forward and braking impulses are equal by construction",
-          abs(imp_on - imp_off) < 1e-9,
-          f"{imp_on:.4f} vs {imp_off:.4f}")
+    duty = cfg.transit_pulse_on_s / (cfg.transit_pulse_on_s + cfg.transit_pulse_off_s)
+    check("net drive is forward", net > 0.05, f"mean tilt {net:+.4f}")
+    check("duty cycle bounds the speed", duty <= 0.6,
+          f"{duty:.0%} of each cycle under power")
 
     # Passing the gate advances to PIVOT.
     out, t = drive(st9, cfg, [(None, None, 0.0, 0.0, None, 1)] * 2, t0=t)

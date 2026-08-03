@@ -31,8 +31,24 @@ export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v anaconda | paste -sd: -)
 
 cleanup; sleep 3  # let UDP ports release or Betaflight fails to bind and every tick eats a 100ms bridge timeout
 
-COURSE="$COURSE_NAME" PYTHONPATH="$DGP_DIR" RACE_SOLVER="$SOLVER" \
-    elodin run sim/main.py > "$LOG" 2>&1 &
+# Elodin writes a per-run telemetry database (betaflight_dbNNN) into the sim
+# directory: 2.6-3.7 GB EACH, and nothing ever removes them. Fifty runs in one
+# session accumulated 163 GB and filled a 926 GB disk, which cost hours and had
+# us deleting caches, a Windows ISO and frame archives while the real consumer
+# sat in the repo the runs were launched from. Clean up before and after.
+rm -rf "$ELODIN_DIR"/betaflight_db* 2>/dev/null
+
+# Filter at the source. Unfiltered, Elodin's per-tick output runs to GIGABYTES
+# for a 200 s sim; the lines we actually read are a few hundred. Note the comment
+# must sit ABOVE the whole command: put between the env assignments and `elodin`
+# it orphans them, and the sim silently runs the DEFAULT course (caught by a run
+# reporting course=easy when vq2turn was asked for).
+COURSE="$COURSE_NAME" PYTHONPATH="$DGP_DIR" RACE_SOLVER="$SOLVER" elodin run sim/main.py 2>&1 \
+    | grep -E --line-buffered "SERVO|PHASE|ALIGN|RACE|GATE|BRINGUP|Error|error|Traceback" \
+    > "$LOG" &
+
+cleanup_dbs() { rm -rf "$ELODIN_DIR"/betaflight_db* 2>/dev/null; }
+trap cleanup_dbs EXIT
 
 for _ in $(seq "$TIMEOUT_S"); do
     if grep -q "\[RACE\]" "$LOG" 2>/dev/null; then
