@@ -1739,3 +1739,18 @@ never cleaned up. Fifty runs filled a 926 GB disk. I blamed the sim logs twice
 and Downloads once, and had Nick delete caches, a Windows ISO and frame archives,
 while `du -sh ~/code/AIGP/elodin` would have answered it the first time.
 run_elodin.sh now removes them before and after every run (trap on EXIT).
+
+## creep verification: 3/4 on vq2turn, limited by the course clock not the design
+
+    [RACE] gates_passed=3/4 pass_times=[11.45, 27.01, 40.33, --]
+
+Passes at 11.45, 27.01 and 40.33 s, and it was mid-TRANSIT toward the fourth when
+the 100 s course clock expired. Every phase cycled cleanly: ALIGN commits with az
+and el inside a degree and closure at zero, TRANSIT reaches the gate, PIVOT turns
+onto the lane, SEEK reacquires. The sequence is doing exactly what it should, just
+slowly — which is the entire point of creeping.
+
+Course clocks raised (vq2turn 100 -> 200 s, vq1 140 -> 300 s). VQ2 has no time
+limit, so neither should the replicas; leaving them at racing durations would fail
+creep on the clock rather than on capability, which is the same mistake that made
+me briefly distrust a working search earlier.
