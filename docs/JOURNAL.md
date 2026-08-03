@@ -1556,3 +1556,37 @@ Test asserts both directions: 53 deg (run 19's actual figure) commands 0.21 rath
 than the 0.70 ceiling, while 10 deg still commands a real correction.
 
 Elodin both COMPLETE: vq1 6/6 77.01s, vq2turn 4/4 54.49s.
+
+## Elodin can now test corridor navigation — and cornav halves the vq2turn time
+
+The gap that mattered: elodin_servo has no camera, so MISSION=cornav shipped to
+the official sim with unit tests and nothing else, right after four consecutive
+well-argued changes had each regressed something these courses caught.
+
+Closed by synthesising the corridor from ground truth. The corridor IS the path
+through the gates, so it projects exactly as observe_from_truth projects a gate:
+points on the remaining-gate polyline at 4 m and 14 m ahead, converted to
+body-relative bearings, with coverage falling off as the lane nears the FOV edge —
+which is how real coverage behaves when the corridor leaves the image.
+
+corridor_nav.blend() now holds the corridor/gate-servo combination and BOTH the
+controller and the harness call it. They drifted apart once before (elodin_servo
+never called gate_passed and projected only the active gate, so Elodin was
+validating code the sim could not reach); a shared function makes that impossible
+rather than merely unlikely.
+
+RESULTS:
+    vq2turn  cornav  4/4 COMPLETE  22.64s   (gate servo: 4/4, 54.49s)
+    vq1      cornav  gates 0,1,2,3 at t=9.6/19.1/30.8/46.2, clean at gate 4
+
+cornav passes vq2turn in UNDER HALF the gate servo's time — not by flying faster
+but by not wandering: the lane is continuously visible, so the searching that ate
+thirty seconds between gates simply does not happen.
+
+TWO TRAPS RECORDED:
+  * The first version imported quat_rotate_inv INSIDE the per-cycle bearing
+    helper. Elodin went 5014x behind real-time and produced one log line in four
+    minutes. Module-level imports only in the control path.
+  * The Mac ran out of disk mid-session (26 MB free of 926 GB) and Bash could not
+    even create its own output file, which blocked cleanup as well as work. Elodin
+    logs accumulate fast; delete /tmp/*.log between sessions.

@@ -120,3 +120,30 @@ def step(state: CorridorState, cfg: CorridorConfig, t: float,
         yaw_rate=yaw,
         have_lane=True,
     )
+
+
+@dataclass(frozen=True)
+class Blend:
+    """What the aircraft should actually do this cycle."""
+    tilt_fwd: float
+    tilt_right: float
+    yaw_rate: float
+    used_corridor: bool
+
+
+def blend(cmd: CorridorCommand, servo_tilt_fwd: float, servo_tilt_right: float,
+          servo_yaw_rate: float, braking: bool) -> Blend:
+    """Combine corridor steering with the gate servo.
+
+    The corridor decides WHERE TO GO whenever it has a lane; the gate servo keeps
+    the vertical channel (handled by the caller, which owns thrust) and takes over
+    steering entirely when the lane is lost. Braking is preserved either way,
+    because shedding speed outranks steering.
+
+    Lives here so controller_vq2 and the Elodin harness cannot drift apart. They
+    did drift once already — elodin_servo never called gate_passed() and projected
+    only the active gate, so Elodin was validating code the sim could not reach.
+    """
+    if not cmd.have_lane:
+        return Blend(servo_tilt_fwd, servo_tilt_right, servo_yaw_rate, False)
+    return Blend(cmd.tilt_fwd, cmd.tilt_right, cmd.yaw_rate, True)

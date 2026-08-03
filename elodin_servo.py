@@ -28,7 +28,9 @@ from solver.api import RCCommand, SensorUpdate  # elodin repo package
 from sim.course import active_course            # elodin repo package
 
 import estimator
+import corridor_nav
 import servo
+from attitude import quat_rotate_inv
 from attitude import quat_rotate
 from bearing import ELODIN_CAM, observe_from_truth, stabilized_bearing
 from flight_stack import HOVER_CMD, motor_commands
@@ -111,6 +113,75 @@ def _detect(update: SensorUpdate):
     return obs
 
 
+# ── Synthetic cyan corridor ──────────────────────────────────────────
+# Elodin has no camera, so MISSION=cornav was untestable here — which meant the
+# new navigation shipped to the official sim with unit tests and nothing else,
+# after four consecutive well-argued changes had each regressed something these
+# courses caught. That gap is what this closes.
+#
+# The corridor IS the path through the gates, so it can be projected from ground
+# truth exactly as observe_from_truth projects a gate. What the real detector
+# measures is the lane centre near the aircraft and further ahead; here those are
+# points along the polyline at NEAR_AHEAD and FAR_AHEAD metres.
+NEAR_AHEAD = 4.0
+FAR_AHEAD = 14.0
+CORR_HALF_FOV = math.radians(45.0)   # lane outside the FOV is not seen
+
+
+def _path_points(idx):
+    """Polyline the course follows from here on: the remaining gate centres."""
+    return [GATES[i] for i in range(max(idx, 0), len(GATES))]
+
+
+def _point_along(pos, pts, ahead):
+    """Point `ahead` metres along the polyline, starting from the aircraft."""
+    prev = pos
+    remaining = ahead
+    for p in pts:
+        seg = (p[0] - prev[0], p[1] - prev[1], p[2] - prev[2])
+        d = math.sqrt(seg[0] ** 2 + seg[1] ** 2 + seg[2] ** 2)
+        if d < 1e-6:
+            continue
+        if remaining <= d:
+            f = remaining / d
+            return (prev[0] + seg[0] * f, prev[1] + seg[1] * f,
+                    prev[2] + seg[2] * f)
+        remaining -= d
+        prev = p
+    return prev
+
+
+def _bearing(q_true, pos, target):
+    """Body-relative bearing to a world point, positive to the right (ENU/FLU)."""
+    rel = (target[0] - pos[0], target[1] - pos[1], target[2] - pos[2])
+    b = quat_rotate_inv([q_true[3], q_true[0], q_true[1], q_true[2]], rel)
+    # FLU: +y is LEFT, so a right-hand bearing is -y.
+    return math.atan2(-b[1], max(b[0], 1e-3))
+
+
+def _synth_corridor(update, idx):
+    """(lane_rad, look_rad, coverage) from ground truth, or (None, None, 0)."""
+    pts = _path_points(idx)
+    if not pts:
+        return None, None, 0.0
+    pos = (float(update.world_pos[4]), float(update.world_pos[5]),
+           float(update.world_pos[6]))
+    q_true = (float(update.world_pos[0]), float(update.world_pos[1]),
+              float(update.world_pos[2]), float(update.world_pos[3]))
+    near = _bearing(q_true, pos, _point_along(pos, pts, NEAR_AHEAD))
+    far = _bearing(q_true, pos, _point_along(pos, pts, FAR_AHEAD))
+    if abs(near) > CORR_HALF_FOV:
+        return None, None, 0.0          # lane not in view
+    # Coverage falls off as the lane approaches the edge of the frame, the way
+    # real coverage does when the corridor leaves the image.
+    cov = max(0.0, min(1.0, 1.0 - abs(near) / CORR_HALF_FOV))
+    return near, (far - near if abs(far) <= CORR_HALF_FOV else None), cov
+
+
+CORNAV = os.environ.get("CORNAV", "1") == "1"   # CORNAV=0 for the gate servo
+
+_corr_state = corridor_nav.CorridorState()
+_corr_cfg = corridor_nav.CorridorConfig()
 _last_idx = [None]
 
 
@@ -169,15 +240,25 @@ def autopilot(update: SensorUpdate) -> RCCommand:
     hx, hy = hx / n, hy / n
     rx, ry = hy, -hx                      # right of heading in ENU (up = +z)
 
-    tilt_x = out.tilt_fwd * hx + out.tilt_right * rx
-    tilt_y = out.tilt_fwd * hy + out.tilt_right * ry
+    # Corridor steering, through the SAME blend() the official controller uses so
+    # the two cannot drift apart.
+    lane, look, cov = (_synth_corridor(update, idx_now) if CORNAV
+                       else (None, None, 0.0))
+    cmd = corridor_nav.step(_corr_state, _corr_cfg, t, lane, look, cov)
+    b = corridor_nav.blend(cmd, out.tilt_fwd, out.tilt_right, out.yaw_rate,
+                           out.braking)
+    _log["lane"] = _log.get("lane", 0) + (1 if b.used_corridor else 0)
+    _log["cycles"] = _log.get("cycles", 0) + 1
+
+    tilt_x = b.tilt_fwd * hx + b.tilt_right * rx
+    tilt_y = b.tilt_fwd * hy + b.tilt_right * ry
 
     thrust = HOVER_CMD + out.vertical * VERT_AUTH
     thrust = max(THRUST_MIN_CMD, min(THRUST_MAX_CMD, thrust))
 
     DIRECT_MOTORS[:] = motor_commands(
         (qx, qy, qz, qw), update.gyro, tilt_x, tilt_y, thrust,
-        yaw_rate_cmd=YAW_SIGN * out.yaw_rate,
+        yaw_rate_cmd=YAW_SIGN * b.yaw_rate,
     )
 
     if t >= _log["next"]:
@@ -191,7 +272,8 @@ def autopilot(update: SensorUpdate) -> RCCommand:
             det = f"NO GATE ({_servo_state.time_since_seen:.1f}s)"
         print(f"  [SERVO] t={t:5.1f} gate={update.next_gate_index} "
               f"pos=({pos[0]:6.1f},{pos[1]:5.1f},{pos[2]:5.1f}) {det} "
-              f"| yaw_rate={out.yaw_rate:+.2f} fwd={out.tilt_fwd:.2f} vert={out.vertical:+.2f}",
+              f"| yaw={b.yaw_rate:+.2f} fwd={b.tilt_fwd:.2f} vert={out.vertical:+.2f} "
+              f"{'LANE' if b.used_corridor else '    '}",
               flush=True)
 
     return RCCommand(arm=1000, throttle=1000)

@@ -642,15 +642,14 @@ class ControllerVQ2:
             cov = k.coverage if k is not None else 0.0
             cmd = corridor_nav.step(self._corr_state, self._corr_cfg, t,
                                     lane, look, cov)
-            self._last_lane = cmd.have_lane
-            if cmd.have_lane:
-                # The corridor decides WHERE TO GO. The gate keeps the vertical
-                # channel (thrust below) and the progress signal; braking still
-                # overrides pitch, since shedding speed outranks steering.
+            b = corridor_nav.blend(cmd, out.tilt_fwd, out.tilt_right,
+                                   out.yaw_rate, out.braking)
+            self._last_lane = b.used_corridor
+            if b.used_corridor:
                 pitch_c = (BRAKE_TILT_RAD if out.braking
-                           else -FWD_TILT_RAD * cmd.tilt_fwd)
-                return (LAT_TILT_RAD * cmd.tilt_right, pitch_c,
-                        cmd.yaw_rate, thrust)
+                           else -FWD_TILT_RAD * b.tilt_fwd)
+                return (LAT_TILT_RAD * b.tilt_right, pitch_c,
+                        b.yaw_rate, thrust)
         roll = LAT_TILT_RAD * out.tilt_right
         return roll, pitch, out.yaw_rate, thrust
 
