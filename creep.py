@@ -68,11 +68,19 @@ class CreepConfig:
     align_kp_yaw: float = 1.4
     align_max_yaw_rate: float = 0.9
     align_kp_el: float = 0.8
+    # Damping on the elevation RATE. Without it the vertical channel is P-only:
+    # by the time el reaches zero the aircraft has vertical velocity, and hover
+    # thrust PRESERVES it because vz is unobservable in steady flight. That is
+    # how ALIGN climbed 1.0 -> 6.8 m before committing.
+    align_kd_el: float = 0.9
     align_max_vertical: float = 0.35
     align_brake_tilt: float = 0.55   # nose-UP while still closing
     align_closure_stop: float = 0.6  # m/s measured; below this we are "stopped"
     align_az_tol_rad: float = 0.05   # ~3 deg
     align_el_tol_rad: float = 0.06   # ~3.5 deg
+    align_el_rate_tol: float = 0.05  # rad/s; commit only when el is STEADY, not
+                                     # merely small — a zero crossing at speed is
+                                     # not an alignment
     align_settle_s: float = 0.5      # hold the tolerance this long before commit
     align_timeout_s: float = 25.0    # give up and re-seek
 
@@ -88,7 +96,11 @@ class CreepConfig:
     transit_pulse_off_s: float = 0.45
     transit_tilt: float = 0.45        # forward during the ON phase
     transit_brake_tilt: float = 0.45  # nose-UP during the OFF phase
-    transit_timeout_s: float = 30.0   # no pass? back to ALIGN and try again
+    # MEASURED, not chosen. Creep covers ~0.33 m/s in Elodin, so 12 m to gate 0
+    # takes ~36 s — and this was 30, so the timeout fired a few seconds before
+    # arrival and threw it back to ALIGN, forever. The failure looked like "does
+    # not translate"; it was translating fine and being interrupted.
+    transit_timeout_s: float = 120.0  # no pass? back to ALIGN and try again
 
     # ── PIVOT ───────────────────────────────────────────────────────
     pivot_kp_yaw: float = 1.2
@@ -106,6 +118,9 @@ class CreepState:
     sweep_pos: float = 0.0
     sweep_dir: float = 1.0
     settled_t: float = 0.0
+    el_prev: float | None = None
+    el_t: float | None = None
+    el_rate: float = 0.0
     gate_index: int | None = None
     pulse_t: float = 0.0
 
@@ -120,7 +135,13 @@ class CreepCommand:
     ignore_vision: bool = False
 
 
-def _enter(state: CreepState, phase: str, t: float) -> None:
+VERBOSE = True     # phase changes are rare; log them everywhere
+
+
+def _enter(state: CreepState, phase: str, t: float, why: str = "") -> None:
+    if VERBOSE and phase != state.phase:
+        print(f"  [PHASE] {state.phase} -> {phase} at t={t:6.2f}"
+              f"{'  (' + why + ')' if why else ''}", flush=True)
     state.phase = phase
     state.phase_t0 = t
     state.settled_t = 0.0
@@ -152,7 +173,7 @@ def step(state: CreepState, cfg: CreepConfig, t: float,
         state.gate_index = gate_index
 
     if state.phase == TRANSIT and passed:
-        _enter(state, PIVOT, t)
+        _enter(state, PIVOT, t, f"gate {gate_index} reached")
         elapsed = 0.0
 
     # ── SEEK ────────────────────────────────────────────────────────
@@ -161,7 +182,7 @@ def step(state: CreepState, cfg: CreepConfig, t: float,
                 and conf >= cfg.acquire_conf
                 and abs(el) <= cfg.acquire_max_el_rad)
         if have:
-            _enter(state, ALIGN, t)
+            _enter(state, ALIGN, t, "gate acquired")
         else:
             state.sweep_pos += state.sweep_dir * cfg.seek_yaw_rate * dt
             if abs(state.sweep_pos) >= cfg.seek_sweep_rad:
@@ -173,12 +194,24 @@ def step(state: CreepState, cfg: CreepConfig, t: float,
     if state.phase == ALIGN:
         if az is None or el is None:
             if elapsed > cfg.align_timeout_s:
-                _enter(state, SEEK, t)
+                _enter(state, SEEK, t, "align timeout, gate lost")
             return CreepCommand(phase=ALIGN)      # hold station, wait for it
 
         yaw = _clamp(cfg.align_kp_yaw * az,
                      -cfg.align_max_yaw_rate, cfg.align_max_yaw_rate)
-        vertical = _clamp(cfg.align_kp_el * el,
+        # Differentiate across the gap between SIGHTINGS, not per control cycle.
+        # el only changes when a new frame arrives, so a per-cycle derivative is
+        # zero between frames and a spike on each update — which pinned el_rate
+        # above tolerance and stopped ALIGN ever committing, with az, el and
+        # closure all well inside their bounds. servo.py's rate already does this
+        # correctly; I did not carry the lesson across.
+        if state.el_prev is None or el != state.el_prev:
+            gap = (t - state.el_t) if state.el_t is not None else 0.0
+            if state.el_prev is not None and gap > 1e-3:
+                state.el_rate += 0.4 * ((el - state.el_prev) / gap - state.el_rate)
+            state.el_prev = el
+            state.el_t = t
+        vertical = _clamp(cfg.align_kp_el * el + cfg.align_kd_el * state.el_rate,
                           -cfg.align_max_vertical, cfg.align_max_vertical)
         # Still closing? Kill the speed before doing anything else — the launch
         # puts several m/s into the aircraft that no cruise setting removes.
@@ -186,12 +219,16 @@ def step(state: CreepState, cfg: CreepConfig, t: float,
 
         aligned = (abs(az) <= cfg.align_az_tol_rad
                    and abs(el) <= cfg.align_el_tol_rad
+                   and abs(state.el_rate) <= cfg.align_el_rate_tol
                    and closure <= cfg.align_closure_stop)
         state.settled_t = state.settled_t + dt if aligned else 0.0
         if state.settled_t >= cfg.align_settle_s:
-            _enter(state, TRANSIT, t)
+            _enter(state, TRANSIT, t,
+                   f"aligned az={math.degrees(az):+.1f} el={math.degrees(el):+.1f} "
+                   f"closure={closure:.2f}")
         elif elapsed > cfg.align_timeout_s:
-            _enter(state, SEEK, t)
+            _enter(state, SEEK, t, f"align timeout az={math.degrees(az):+.1f} "
+                                   f"el={math.degrees(el):+.1f} closure={closure:.2f}")
         else:
             return CreepCommand(tilt_fwd=fwd, yaw_rate=yaw, vertical=vertical,
                                 phase=ALIGN)
@@ -199,7 +236,7 @@ def step(state: CreepState, cfg: CreepConfig, t: float,
     # ── TRANSIT ─────────────────────────────────────────────────────
     if state.phase == TRANSIT:
         if elapsed > cfg.transit_timeout_s:
-            _enter(state, ALIGN, t)
+            _enter(state, ALIGN, t, "transit timeout, no gate pass")
             return CreepCommand(phase=ALIGN)
         state.pulse_t += dt
         period = cfg.transit_pulse_on_s + cfg.transit_pulse_off_s

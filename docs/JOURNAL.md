@@ -1672,3 +1672,31 @@ wrote:
 
 race and cornav are untouched and still the flyable configurations; cornav remains
 vq1 6/6 64.58s and vq2turn 4/4 22.64s.
+
+## creep: TRANSIT solved, ALIGN now the blocker — NEXT STEP IS SPECIFIC
+
+Phase instrumentation (creep._enter logs every transition with a reason) turned a
+mystery into a sequence. Two findings:
+
+1. TRANSIT WAS NEVER BROKEN. It translates at ~0.33 m/s, so 12 m to gate 0 needs
+   ~36 s, and transit_timeout_s was 30 — the timeout fired a few seconds before
+   arrival and threw it back to ALIGN, forever. "Does not translate" was
+   "translating fine and being interrupted". Now 120 s.
+
+2. ALIGN NOW NEVER COMMITS:
+       [PHASE] ALIGN -> SEEK at t=25.03 (align timeout az=-0.4 el=+0.1 closure=0.11)
+   az, el and closure are ALL well inside tolerance (0.05 rad, 0.06 rad, 0.6 m/s),
+   so the blocker is the align_el_rate_tol condition I added. Two attempts at it
+   failed: first computing el_rate per control cycle (wrong — el only changes at
+   detector rate, so the derivative is zero between frames and spikes on each
+   update), then differentiating across sightings as servo.py does. Neither
+   changed the outcome, so el_rate may not be the culprit at all.
+
+   THE NEXT DIAGNOSTIC IS TO LOG THE FOUR SUB-CONDITIONS SEPARATELY. `aligned` is
+   an AND of four terms and the log only shows three of them; settled_t resets on
+   any single flicker, and at Elodin's control rate 0.5 s of settle is hundreds of
+   consecutive cycles. One print of (az_ok, el_ok, rate_ok, closure_ok, settled_t)
+   will name the term that never holds. Guessing at it has now cost three runs —
+   instrument first.
+
+race and cornav remain the flyable configurations and are untouched.
