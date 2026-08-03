@@ -1577,7 +1577,8 @@ rather than merely unlikely.
 
 RESULTS:
     vq2turn  cornav  4/4 COMPLETE  22.64s   (gate servo: 4/4, 54.49s)
-    vq1      cornav  gates 0,1,2,3 at t=9.6/19.1/30.8/46.2, clean at gate 4
+    vq1      cornav  6/6 COMPLETE  64.58s   (gate servo: 6/6, 77.01s)
+                     pass times 9.55 / 19.11 / 30.79 / 46.17 / 55.45 / 64.58
 
 cornav passes vq2turn in UNDER HALF the gate servo's time — not by flying faster
 but by not wandering: the lane is continuously visible, so the searching that ate
@@ -1590,3 +1591,21 @@ TWO TRAPS RECORDED:
   * The Mac ran out of disk mid-session (26 MB free of 926 GB) and Bash could not
     even create its own output file, which blocked cleanup as well as work. Elodin
     logs accumulate fast; delete /tmp/*.log between sessions.
+
+## Both courses complete under corridor navigation
+
+    course    gate servo        cornav
+    vq1       6/6  77.01s       6/6  64.58s
+    vq2turn   4/4  54.49s       4/4  22.64s
+
+cornav is faster on BOTH, and it is not flying faster — cruise_tilt is identical.
+It is not wandering. The gate servo loses its target after every pass and burns
+seconds sweeping for the next one; the corridor is continuously visible, so there
+is nothing to search for. On vq2turn that difference is the whole 32 seconds.
+
+This is the first change in the project that improves both courses at once. Every
+recent one traded a win on the failing course for a regression on the other, which
+is what overfitting to the last log looks like.
+
+Corridor navigation is now verified the way everything before it was: two courses,
+full suite, offline, before Nick spends a run.
