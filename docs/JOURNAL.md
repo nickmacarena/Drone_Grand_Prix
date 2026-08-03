@@ -1638,3 +1638,37 @@ Worth noting what the corridor bought: for the first time the failure is a singl
 identifiable event with a physical mechanism, rather than a tangle of impostor
 tracks, elevation walk-ups and search thrash. Navigation being solid is what made
 the remaining bug legible.
+
+## MISSION=creep — Nick's state machine, built and unit-tested; not yet flying
+
+    SEEK     hold station, sweep for an orange gate
+    ALIGN    kill speed, centre the gate in az and el, NO forward drive
+    TRANSIT  short forward pulses, attitude level, VISION IGNORED
+    PIVOT    hold station, yaw onto the cyan lane, -> SEEK
+
+Why this is the right shape. The continuous blend produced a run of MARGINAL
+failures: run 27 braked at pitch +27 deg because the tracked range read 4.3 m
+against a 4.0 m inhibit — 0.3 m decided the crash. Phases do not have that
+property. And the deeper point: we kept correcting at ranges where corrections
+cannot help. Every gate crash came from reacting to a sighting inside the last two
+metres, so TRANSIT ignores vision outright.
+
+17 unit tests pass, including the load-bearing ones: only a stopped and centred
+aircraft commits; a 23 deg azimuth error or 4 m/s of closure does not; TRANSIT
+ignores a 52 deg azimuth and 50 deg elevation sighting entirely.
+
+TWO PULSE BUGS, one found by Elodin and one I should have caught in the test I
+wrote:
+  1. pulse_on 0.45 s at +0.45 against pulse_off 0.55 s at -0.45 nets -0.045 every
+     cycle. The aircraft reversed 75 m down the course. My own test printed "mean
+     tilt -0.045" and I read it as "close to zero" — a systematically signed mean
+     is a direction, not zero. Impulses now match by construction and the test
+     asserts on_s*tilt == off_s*brake directly rather than on a loose tolerance.
+  2. With impulses matched it no longer reverses, but it does not TRANSLATE
+     either: 100 s in TRANSIT, position still near the start, drifting up to
+     z=6.8. Either the phase is thrashing ALIGN<->TRANSIT (transit_timeout_s is
+     30 s and should have fired), or drag eats the ~0.22 m of displacement each
+     cycle should produce. UNRESOLVED — do not fly this until it is.
+
+race and cornav are untouched and still the flyable configurations; cornav remains
+vq1 6/6 64.58s and vq2turn 4/4 22.64s.

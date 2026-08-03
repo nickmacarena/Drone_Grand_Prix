@@ -100,7 +100,7 @@ def fly(mission, steps=1400, gate_visible=True, plant_standard=True,
     # production sets via env before import), so assigning C.MISSION alone leaves
     # them stale and the corridor branch stays unreachable. Same late-binding trap
     # as the yaw_sign signature default.
-    C.CORRIDOR_LOG = mission in ("corridor", "cornav")
+    C.CORRIDOR_LOG = mission in ("corridor", "cornav", "creep")
     C.CORRIDOR_NAV = mission == "cornav"
     C.time.sleep = lambda _s: None          # no real-time pacing in tests
     clock = {"t": 1000.0}
@@ -153,7 +153,7 @@ def fly(mission, steps=1400, gate_visible=True, plant_standard=True,
 def main():
     print("=== controller smoke (no simulator) ===\n")
 
-    for mission in ("hover", "race", "yawtest", "corridor", "cornav"):
+    for mission in ("hover", "race", "yawtest", "corridor", "cornav", "creep"):
         try:
             ctl, thrusts = fly(mission)
             ok = len(thrusts) > 0

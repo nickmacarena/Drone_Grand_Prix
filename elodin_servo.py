@@ -29,6 +29,7 @@ from sim.course import active_course            # elodin repo package
 
 import estimator
 import corridor_nav
+import creep
 import servo
 from attitude import quat_rotate_inv
 from attitude import quat_rotate
@@ -179,6 +180,9 @@ def _synth_corridor(update, idx):
 
 
 CORNAV = os.environ.get("CORNAV", "1") == "1"   # CORNAV=0 for the gate servo
+CREEP = os.environ.get("CREEP", "0") == "1"     # CREEP=1 for the state machine
+_creep_state = creep.CreepState()
+_creep_cfg = creep.CreepConfig()
 
 _corr_state = corridor_nav.CorridorState()
 _corr_cfg = corridor_nav.CorridorConfig()
@@ -250,15 +254,31 @@ def autopilot(update: SensorUpdate) -> RCCommand:
     _log["lane"] = _log.get("lane", 0) + (1 if b.used_corridor else 0)
     _log["cycles"] = _log.get("cycles", 0) + 1
 
-    tilt_x = b.tilt_fwd * hx + b.tilt_right * rx
-    tilt_y = b.tilt_fwd * hy + b.tilt_right * ry
+    if CREEP:
+        # Same state machine the official controller runs, fed from this
+        # harness's observations. Elodin could not exercise cornav at all until
+        # the corridor was synthesised; creep must not repeat that.
+        c_az = target.az if target is not None else None
+        c_el = target.el if target is not None else None
+        c_conf = target.confidence if target is not None else 0.0
+        closure = max(0.0, -_servo_state.rng_rate)
+        ccmd = creep.step(_creep_state, _creep_cfg, t, c_az, c_el, c_conf,
+                          closure, lane, idx_now)
+        _log["phase"] = ccmd.phase
+        fwd, right, yawr = ccmd.tilt_fwd, ccmd.tilt_right, ccmd.yaw_rate
+        vert = ccmd.vertical
+    else:
+        fwd, right, yawr, vert = b.tilt_fwd, b.tilt_right, b.yaw_rate, out.vertical
 
-    thrust = HOVER_CMD + out.vertical * VERT_AUTH
+    tilt_x = fwd * hx + right * rx
+    tilt_y = fwd * hy + right * ry
+
+    thrust = HOVER_CMD + vert * VERT_AUTH
     thrust = max(THRUST_MIN_CMD, min(THRUST_MAX_CMD, thrust))
 
     DIRECT_MOTORS[:] = motor_commands(
         (qx, qy, qz, qw), update.gyro, tilt_x, tilt_y, thrust,
-        yaw_rate_cmd=YAW_SIGN * b.yaw_rate,
+        yaw_rate_cmd=YAW_SIGN * yawr,
     )
 
     if t >= _log["next"]:
@@ -272,8 +292,8 @@ def autopilot(update: SensorUpdate) -> RCCommand:
             det = f"NO GATE ({_servo_state.time_since_seen:.1f}s)"
         print(f"  [SERVO] t={t:5.1f} gate={update.next_gate_index} "
               f"pos=({pos[0]:6.1f},{pos[1]:5.1f},{pos[2]:5.1f}) {det} "
-              f"| yaw={b.yaw_rate:+.2f} fwd={b.tilt_fwd:.2f} vert={out.vertical:+.2f} "
-              f"{'LANE' if b.used_corridor else '    '}",
+              f"| yaw={yawr:+.2f} fwd={fwd:+.2f} vert={vert:+.2f} "
+              f"{_log.get('phase', '') if CREEP else ('LANE' if b.used_corridor else '')}",
               flush=True)
 
     return RCCommand(arm=1000, throttle=1000)

@@ -31,6 +31,7 @@ from dataclasses import replace
 from attitude import quat_rotate
 from bearing import AIGP_CAM, stabilized_bearing
 import corridor_nav
+import creep
 from corridor import detect_corridor
 from detector import detect_gate
 from mavlink_tx import send_arm, send_attitude_rates
@@ -96,7 +97,7 @@ YAW_AUTOFLIP = os.environ.get("YAW_AUTOFLIP", "0") == "1"
 # corridor: fly like race, only MEASURE the lane. cornav: actually steer on it.
 # Kept as separate missions so the gate-servo baseline stays flyable and a bad
 # outcome costs a run rather than the working configuration.
-CORRIDOR_LOG = MISSION in ("corridor", "cornav")
+CORRIDOR_LOG = MISSION in ("corridor", "cornav", "creep")
 CORRIDOR_NAV = MISSION == "cornav"
 
 # The corridor says nothing useful unless we are upright. Run-22 frames 36 and 37
@@ -214,6 +215,9 @@ class ControllerVQ2:
         self._corr_state = corridor_nav.CorridorState()
         self._corr_cfg = corridor_nav.CorridorConfig()
         self._last_lane = False
+        self._creep_state = creep.CreepState()
+        self._creep_cfg = creep.CreepConfig()
+        self._last_creep = None
         self._yawtest_t0 = None
         self._yawtest_samples = []
         self._yawtest_last_report = 0.0
@@ -345,6 +349,8 @@ class ControllerVQ2:
                       f"starting mission", flush=True)
             return 0.0, 0.0, 0.0, self._damped_hover()
 
+        if MISSION == "creep":
+            return self._creep_step(t)
         if MISSION in ("race", "corridor", "cornav"):
             return self._race_step(t)
         if MISSION == "yawtest":
@@ -559,6 +565,56 @@ class ControllerVQ2:
             print(f"  [YAW] steering looks INVERTED ({wrong}/{n} samples); "
                   f"not flipping (YAW_AUTOFLIP=1 to enable)", flush=True)
 
+    def _creep_step(self, t):
+        """Gate-at-a-time: align, commit, pass, pivot (see creep.py)."""
+        frame = self.shared.latest_frame
+        if frame is not None and frame is not self._last_frame_seen:
+            self._last_frame_seen = frame
+            try:
+                self._last_obs = detect_gate(frame, self.cam)
+            except Exception:
+                self._last_obs = None
+            try:
+                roll, pitch, _ = (self._est_euler() if self.est.initialized
+                                  else (0.0, 0.0, 0.0))
+                upright = (abs(roll) <= CORR_MAX_ROLL_RAD
+                           and abs(pitch) <= CORR_MAX_ROLL_RAD)
+                self._last_corr = detect_corridor(frame) if upright else None
+            except Exception:
+                self._last_corr = None
+
+        obs = self._last_obs
+        az = el = None
+        conf = 0.0
+        if obs is not None:
+            az, el = stabilized_bearing(self.cam, obs, self.est.q, self.up_world)
+            conf = obs.confidence
+            # Range and its rate come from the servo tracker, which is the only
+            # thing filtering the raw width estimate.
+            servo.step(self.servo_state, self.servo_cfg, t,
+                       servo.Target(az=az, el=el, confidence=conf,
+                                    range_m=obs.range_m))
+        closure = max(0.0, -self.servo_state.rng_rate)
+
+        k = self._last_corr
+        lane = k.lateral_rad if (k is not None and k.valid
+                                 and k.coverage >= 0.25) else None
+        rs = self.shared.race_status
+        gate_idx = rs.active_gate_index if rs is not None else None
+
+        cmd = creep.step(self._creep_state, self._creep_cfg, t,
+                         az, el, conf, closure, lane, gate_idx)
+        self._last_creep = cmd
+
+        # tilt_fwd is a fraction of the FORWARD limit when positive and of the
+        # much larger BRAKE limit when negative, because stopping needs authority
+        # that cruising does not.
+        f = cmd.tilt_fwd
+        pitch_c = (-FWD_TILT_RAD * f) if f >= 0.0 else (BRAKE_TILT_RAD * -f)
+        thrust = _clamp(self.hover * (1.0 + VERT_AUTH_FRAC * cmd.vertical),
+                        THRUST_MIN, THRUST_MAX)
+        return (LAT_TILT_RAD * cmd.tilt_right, pitch_c, cmd.yaw_rate, thrust)
+
     def _race_step(self, t):
         """Full visual servoing: detect the gate, de-rotate the sighting into
         the level frame with the IMU attitude, servo onto it."""
@@ -705,6 +761,13 @@ class ControllerVQ2:
                       f"w_near={k.width_near:5.0f} cov={k.coverage:.2f} "
                       f"cyan={k.cyan_frac * 100:5.2f}% rows={len(k.rows)}",
                       flush=True)
+        if self._last_creep is not None:
+            print(f"  [CREEP] {self._last_creep.phase:<7} "
+                  f"fwd={self._last_creep.tilt_fwd:+.2f} "
+                  f"yaw={self._last_creep.yaw_rate:+.2f} "
+                  f"vert={self._last_creep.vertical:+.2f}"
+                  f"{'  vision-ignored' if self._last_creep.ignore_vision else ''}",
+                  flush=True)
         print(f"  [VQ2] {MISSION} {att} a_up={a_up:+5.2f} thr={thrust:.2f} "
               f"vz={self.vz_est:+5.2f} hov={hov} armed={hb.armed if hb else '?'} "
               f"gate={rs.active_gate_index if rs else '?'} "
